@@ -1,0 +1,38 @@
+# cbindgen configuration for generating C headers
+
+language = "C"
+header = """
+/**
+ * NWabiSabi C API
+ *
+ * Rust implementation of the WabiSabi anonymous credential protocol
+ *
+ * SAFETY: All functions accept raw pointers. Callers must ensure:
+ * - Pointers are non-null unless documented as optional
+ * - Memory is freed using the appropriate _destroy functions
+ * - Objects are not used after being destroyed
+ */
+"""
+
+include_version = true
+namespace = "wabisabi"
+cpp_compat = true
+style = "both"
+
+[export]
+prefix = "wabisabi_"
+include = ["OpaqueClient", "OpaqueIssuer", "OpaqueRandom", "OpaqueCredential", "FFIError", "FFIGroupElement", "FFIScalar", "FFIGroupElementArray", "FFIScalarArray", "FFIAmountArray"]
+
+[export.rename]
+"OpaqueClient" = "WabiSabiClient"
+"OpaqueIssuer" = "CredentialIssuer"
+"OpaqueRandom" = "Random"
+"OpaqueCredential" = "Credential"
+
+[parse]
+parse_deps = false
+include = ["nwabisabi"]
+
+[parse.expand]
+crates = ["nwabisabi"]
+features = ["ffi"]

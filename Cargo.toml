@@ -1,0 +1,44 @@
+[package]
+name = "nwabisabi"
+version = "0.1.0"
+edition = "2021"
+authors = ["NWabiSabi Contributors"]
+description = "Rust implementation of the WabiSabi anonymous credential protocol"
+license = "MIT"
+repository = "https://github.com/lontivero/WabiSabi"
+
+[dependencies]
+# Cryptography
+secp256k1 = { version = "0.29", features = ["global-context", "rand", "serde"] }
+strobe-rs = "0.8"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_bytes = "0.11"
+
+# Utilities
+thiserror = "1.0"
+lazy_static = "1.5"
+hex = "0.4"
+sha2 = "0.10"
+
+# Random number generation
+rand = { version = "0.8", features = ["getrandom"] }
+rand_core = "0.6"
+
+[dev-dependencies]
+criterion = "0.5"
+proptest = "1.5"
+
+[lib]
+name = "nwabisabi"
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[features]
+default = []
+ffi = []
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

@@ -1,0 +1,25 @@
+# Rust
+/target/
+# Cargo.lock - KEEP THIS for Nix reproducibility
+# Note: Normally libraries don't commit Cargo.lock, but we need it for Nix builds
+**/*.rs.bk
+*.pdb
+
+# Nix
+/result
+/result-*
+.direnv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated files
+/include/nwabisabi.h
