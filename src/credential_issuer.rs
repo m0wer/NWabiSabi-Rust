@@ -70,6 +70,30 @@ impl CredentialIssuer {
         self
     }
 
+    /// Override the maximum amount accepted by this issuer; the range-proof
+    /// width is recomputed to the minimum number of bits needed to represent
+    /// `max_amount` (matches C# `CredentialIssuer` behaviour).
+    pub fn with_max_amount(mut self, max_amount: i64) -> Self {
+        let width = if max_amount <= 0 {
+            0
+        } else {
+            (i64::BITS - max_amount.leading_zeros()) as usize
+        };
+        self.range_proof_width = width;
+        self.max_amount = max_amount;
+        self
+    }
+
+    /// Range-proof width currently configured on this issuer.
+    pub fn range_proof_width(&self) -> usize {
+        self.range_proof_width
+    }
+
+    /// Maximum credential amount accepted by this issuer.
+    pub fn max_amount(&self) -> i64 {
+        self.max_amount
+    }
+
     pub fn parameters(&self) -> &CredentialIssuerParameters {
         &self.parameters
     }
@@ -90,7 +114,10 @@ impl CredentialIssuer {
         let proofs = request.proofs();
 
         if requested.len() != CREDENTIAL_NUMBER {
-            return Err(WabiSabiError::InvalidNumberOfCredentials);
+            return Err(WabiSabiError::InvalidNumberOfRequestedCredentials {
+                expected: CREDENTIAL_NUMBER,
+                actual: requested.len(),
+            });
         }
 
         // Heuristic for null requests: matches the client constructor.
@@ -98,8 +125,25 @@ impl CredentialIssuer {
             && delta == 0
             && requested.iter().all(|r| r.bit_commitments().is_empty());
 
+        // Real (non-null) requests must present exactly CREDENTIAL_NUMBER credentials.
+        if !is_null && presented.len() != CREDENTIAL_NUMBER {
+            return Err(WabiSabiError::InvalidNumberOfPresentedCredentials {
+                expected: CREDENTIAL_NUMBER,
+                actual: presented.len(),
+            });
+        }
+
         if !is_null && delta.abs() > self.max_amount {
             return Err(WabiSabiError::InvalidAmount);
+        }
+
+        // Each non-null requested credential must carry exactly `range_proof_width` bit commitments.
+        if !is_null {
+            for req in requested {
+                if req.bit_commitments().len() != self.range_proof_width {
+                    return Err(WabiSabiError::InvalidBitCommitment);
+                }
+            }
         }
 
         // Balance check (delta is added to coordinator, subtracted from client).

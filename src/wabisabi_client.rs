@@ -55,6 +55,22 @@ impl WabiSabiClient {
         self
     }
 
+    /// Override the range-proof width to fit `max_amount`. Mirrors the
+    /// coordinator's `with_max_amount`.
+    pub fn with_max_amount(mut self, max_amount: i64) -> Self {
+        self.range_proof_width = if max_amount <= 0 {
+            0
+        } else {
+            (i64::BITS - max_amount.leading_zeros()) as usize
+        };
+        self
+    }
+
+    /// Range-proof width currently configured on this client.
+    pub fn range_proof_width(&self) -> usize {
+        self.range_proof_width
+    }
+
     /// Coordinator parameters this client was instantiated against.
     pub fn coordinator_parameters(&self) -> &CredentialIssuerParameters {
         &self.coordinator_parameters
