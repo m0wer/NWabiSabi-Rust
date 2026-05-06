@@ -211,8 +211,39 @@ impl<'de> Deserialize<'de> for GroupElement {
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> std::result::Result<Self, D::Error> {
-        use serde::de::Error;
-        let bytes: Vec<u8> = Deserialize::deserialize(deserializer)?;
+        use serde::de::{Error, SeqAccess, Visitor};
+        use std::fmt;
+
+        // Match the `Serialize` impl which emits a 33-byte tuple (compact
+        // SEC1 form). Decoding as `Vec<u8>` instead would prepend a
+        // length tag in length-prefixed codecs (bincode default), which
+        // breaks every round-trip through binary formats. JSON-style
+        // formats serialize tuples and seqs identically, so the visitor
+        // approach is safe across both.
+        struct ByteTupleVisitor;
+        impl<'de> Visitor<'de> for ByteTupleVisitor {
+            type Value = [u8; 33];
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a 33-byte SEC1 group element")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<[u8; 33], A::Error> {
+                let mut buf = [0u8; 33];
+                for slot in &mut buf {
+                    *slot = seq
+                        .next_element()?
+                        .ok_or_else(|| A::Error::invalid_length(33, &self))?;
+                }
+                Ok(buf)
+            }
+            // Some compact codecs (e.g. CBOR) prefer `bytes` over a
+            // tuple; accept that path too so the wire format degrades
+            // gracefully across serializers.
+            fn visit_bytes<E: Error>(self, v: &[u8]) -> std::result::Result<[u8; 33], E> {
+                <[u8; 33]>::try_from(v).map_err(|_| E::invalid_length(v.len(), &self))
+            }
+        }
+
+        let bytes = deserializer.deserialize_tuple(33, ByteTupleVisitor)?;
         Self::from_bytes(&bytes).map_err(D::Error::custom)
     }
 }
