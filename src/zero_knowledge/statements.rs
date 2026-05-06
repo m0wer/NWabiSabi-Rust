@@ -232,7 +232,7 @@ pub fn range_proof_knowledge<R: WabiSabiRandom>(
     r: Scalar,
     width: usize,
     rng: &mut R,
-) -> Result<(Knowledge, Vec<GroupElement>)> {
+) -> Result<(Knowledge, GroupElement, Vec<GroupElement>)> {
     if width > MAX_RANGE_PROOF_WIDTH {
         return Err(crate::error::WabiSabiError::Unspecified);
     }
@@ -275,7 +275,7 @@ pub fn range_proof_knowledge<R: WabiSabiRandom>(
     }
 
     let knowledge = Knowledge::new(statement, ScalarVector::new(witness_vec))?;
-    Ok((knowledge, bit_commitments))
+    Ok((knowledge, ma, bit_commitments))
 }
 
 /// Range-proof statement: prove `Ma` commits to a value in `[0, 2^width)`
@@ -495,7 +495,7 @@ mod tests {
         let mut rng = fresh_rng();
         let value: u64 = 0b1010_1100; // 172, fits in 8 bits
         let r = rng.get_scalar();
-        let (knowledge, _bit_commitments) = range_proof_knowledge(value, r, 8, &mut rng).unwrap();
+        let (knowledge, _ma, _bit_commitments) = range_proof_knowledge(value, r, 8, &mut rng).unwrap();
         knowledge.assert_soundness().expect("range witness");
 
         let mut tp = Transcript::new(b"range-test");
@@ -515,7 +515,7 @@ mod tests {
         let mut rng = fresh_rng();
         let value: u64 = 1_234_567_890_123;
         let r = rng.get_scalar();
-        let (knowledge, _) = range_proof_knowledge(value, r, 51, &mut rng).unwrap();
+        let (knowledge, _ma, _) = range_proof_knowledge(value, r, 51, &mut rng).unwrap();
         knowledge.assert_soundness().expect("range witness");
 
         let mut tp = Transcript::new(b"range-test-51");

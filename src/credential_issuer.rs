@@ -1,71 +1,84 @@
-use crate::constants::CREDENTIAL_NUMBER;
-use crate::credential_requesting::{CredentialsRequest, CredentialsResponse};
-use crate::crypto::randomness::WabiSabiRandom;
-use crate::crypto::{
-    CredentialIssuerParameters, CredentialIssuerSecretKey, GroupElement, Mac, Scalar,
-    ScalarVector,
+//! Coordinator-side credential issuer.
+//!
+//! Mirrors `WalletWasabi.WabiSabi.Crypto.CredentialIssuer`. Verification
+//! and MAC-issuance proofs share a single Fiat-Shamir transcript labelled
+//! `UnifiedRegistration/{N}/{isNull}` to bind the request and response
+//! together (matches `WabiSabiClient`).
+
+use crate::constants::{CREDENTIAL_NUMBER, RANGE_PROOF_WIDTH};
+use crate::credential_requesting::{
+    CredentialsRequest, CredentialsResponse, IssuanceRequest,
 };
+use crate::crypto::randomness::WabiSabiRandom;
+use crate::crypto::{CredentialIssuerParameters, CredentialIssuerSecretKey, Mac};
 use crate::error::{Result, WabiSabiError};
-use crate::zero_knowledge::{Knowledge, ProofSystem, Statement, Transcript};
+use crate::zero_knowledge::{
+    statements::{
+        balance_proof_statement, issuance_request_statement, issuer_parameters_knowledge,
+        show_credential_statement, zero_proof_statement,
+    },
+    Knowledge, ProofSystem, Statement, Transcript,
+};
 use crate::Generators;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Coordinator-side credential issuer with thread-safe state management
+fn build_transcript(is_null: bool) -> Transcript {
+    let label = format!(
+        "UnifiedRegistration/{}/{}",
+        CREDENTIAL_NUMBER,
+        if is_null { "True" } else { "False" }
+    );
+    Transcript::new(label.as_bytes())
+}
+
+/// Coordinator-side credential issuer with thread-safe state management.
 ///
-/// Tracks balance and prevents double-spending via serial number tracking
+/// Tracks balance and prevents double-spending via serial-number tracking.
 pub struct CredentialIssuer {
-    /// Secret key for MAC issuance
     secret_key: CredentialIssuerSecretKey,
-    /// Public parameters
     parameters: CredentialIssuerParameters,
-    /// Current balance (atomic for lock-free reads/updates)
     balance: Arc<AtomicI64>,
-    /// Serial numbers already seen (prevents double-spending)
     serial_numbers: Arc<Mutex<HashSet<Vec<u8>>>>,
+    range_proof_width: usize,
+    max_amount: i64,
 }
 
 impl CredentialIssuer {
-    /// Create a new credential issuer
-    ///
-    /// # Arguments
-    /// * `secret_key` - Secret key for MAC issuance
-    /// * `initial_balance` - Starting balance for the coordinator
+    /// Create a new credential issuer with the supplied initial balance.
     pub fn new(secret_key: CredentialIssuerSecretKey, initial_balance: i64) -> Result<Self> {
         let parameters = secret_key.compute_parameters()?;
-
         Ok(Self {
             secret_key,
             parameters,
             balance: Arc::new(AtomicI64::new(initial_balance)),
             serial_numbers: Arc::new(Mutex::new(HashSet::new())),
+            range_proof_width: RANGE_PROOF_WIDTH,
+            max_amount: (1u64 << RANGE_PROOF_WIDTH).saturating_sub(1) as i64,
         })
     }
 
-    /// Get the public parameters
+    /// Override the range-proof width accepted by this issuer.
+    pub fn with_range_proof_width(mut self, width: usize) -> Self {
+        self.range_proof_width = width;
+        self.max_amount = if width >= 63 {
+            i64::MAX
+        } else {
+            ((1u64 << width) - 1) as i64
+        };
+        self
+    }
+
     pub fn parameters(&self) -> &CredentialIssuerParameters {
         &self.parameters
     }
 
-    /// Get the current balance
     pub fn balance(&self) -> i64 {
         self.balance.load(Ordering::SeqCst)
     }
 
-    /// Handle a credential request and issue credentials
-    ///
-    /// # Arguments
-    /// * `request` - The credential request from a client
-    /// * `random` - Random number generator for MAC generation
-    ///
-    /// # Returns
-    /// CredentialsResponse containing issued MACs and proofs
-    ///
-    /// # Errors
-    /// - Returns error if proofs are invalid
-    /// - Returns error if serial numbers are reused (double-spend)
-    /// - Returns error if balance would go negative
+    /// Validate a request, update issuer state, and produce the response.
     pub fn handle_request<R: WabiSabiRandom>(
         &self,
         request: &dyn CredentialsRequest,
@@ -76,249 +89,138 @@ impl CredentialIssuer {
         let requested = request.requested();
         let proofs = request.proofs();
 
-        // Validate request structure
         if requested.len() != CREDENTIAL_NUMBER {
             return Err(WabiSabiError::InvalidNumberOfCredentials);
         }
 
-        // Check balance before processing
+        // Heuristic for null requests: matches the client constructor.
+        let is_null = presented.is_empty()
+            && delta == 0
+            && requested.iter().all(|r| r.bit_commitments().is_empty());
+
+        if !is_null && delta.abs() > self.max_amount {
+            return Err(WabiSabiError::InvalidAmount);
+        }
+
+        // Balance check (delta is added to coordinator, subtracted from client).
         let current_balance = self.balance.load(Ordering::SeqCst);
         let new_balance = current_balance
-            .checked_sub(delta)
-            .ok_or_else(|| WabiSabiError::NegativeBalance(current_balance - delta))?;
-
+            .checked_add(delta)
+            .ok_or(WabiSabiError::Unspecified)?;
         if new_balance < 0 {
             return Err(WabiSabiError::NegativeBalance(new_balance));
         }
 
-        // Extract serial numbers from presented credentials
+        // Double-spend detection on presented serial numbers.
         let serial_numbers: Vec<Vec<u8>> = presented
             .iter()
             .map(|p| p.s().to_bytes().to_vec())
             .collect();
-
-        // Check for serial number reuse (double-spending)
         {
+            let mut sorted = serial_numbers.clone();
+            sorted.sort();
+            sorted.dedup();
+            if sorted.len() != serial_numbers.len() {
+                return Err(WabiSabiError::SerialNumberAlreadyUsed);
+            }
             let seen = self.serial_numbers.lock().unwrap();
-            for serial in serial_numbers.iter() {
-                if seen.contains(serial) {
+            for s in &serial_numbers {
+                if seen.contains(s) {
                     return Err(WabiSabiError::SerialNumberAlreadyUsed);
                 }
             }
         }
 
-        // Verify all proofs
-        let verification_result =
-            self.verify_request_proofs(request, random);
+        // Verify request proofs and issue MACs on the same transcript.
+        let mut transcript = build_transcript(is_null);
 
-        if let Err(e) = verification_result {
-            // Don't update state on verification failure
-            return Err(e);
+        let request_statements = self.build_request_statements(request, is_null)?;
+        if request_statements.len() != proofs.len() {
+            return Err(WabiSabiError::CoordinatorReceivedInvalidProofs);
+        }
+        if !ProofSystem::verify(&mut transcript, &request_statements, proofs)? {
+            return Err(WabiSabiError::CoordinatorReceivedInvalidProofs);
         }
 
-        // All checks passed - update state
-        self.balance.store(new_balance, Ordering::SeqCst);
+        // Issue MACs on the now-advanced transcript.
+        let (issued, issuance_knowledge) = self.issue_macs(requested, random)?;
+        let issuance_proofs = ProofSystem::prove(&mut transcript, &issuance_knowledge, random)?;
 
+        // Commit state mutations only after every check passed.
+        self.balance.store(new_balance, Ordering::SeqCst);
         {
             let mut seen = self.serial_numbers.lock().unwrap();
-            for serial in serial_numbers.iter() {
-                seen.insert(serial.clone());
+            for s in serial_numbers {
+                seen.insert(s);
             }
         }
 
-        // Issue credentials
-        self.issue_credentials(requested, random)
+        Ok(CredentialsResponse::new(issued, issuance_proofs))
     }
 
-    /// Verify all proofs in a credential request
-    ///
-    /// NOTE: The full real-credentials verification (presentation + balance +
-    /// range proofs aggregated) is not yet wired up — see GitHub issue tracker.
-    /// For now, the issuer accepts the proof set produced by the
-    /// corresponding ``WabiSabiClient`` request constructor:
-    ///
-    /// - Zero-amount requests: one knowledge-of-randomness proof per
-    ///   ``Ma_i = r_i * Gh``. We verify these individually here.
-    /// - Real-amount requests: not yet verified. Fall through to ``Ok(())``
-    ///   so callers exercise the issuance path. This will be tightened once
-    ///   ``CredentialPresentation::create_knowledge_statement`` and the
-    ///   aggregated balance/range statements are implemented.
-    fn verify_request_proofs<R: WabiSabiRandom>(
+    /// Construct verification statements in the canonical C# order:
+    /// presentations → range/zero proofs → balance proof.
+    fn build_request_statements(
         &self,
         request: &dyn CredentialsRequest,
-        _random: &mut R,
-    ) -> Result<()> {
+        is_null: bool,
+    ) -> Result<Vec<Statement>> {
         let presented = request.presented();
         let requested = request.requested();
-        let proofs = request.proofs();
-        let delta = request.delta();
+        let mut statements: Vec<Statement> =
+            Vec::with_capacity(presented.len() + requested.len() + 1);
 
-        // Detect a zero-amount issuance request: no presented credentials,
-        // delta == 0, no bit commitments on any requested issuance.
-        let is_zero_request = presented.is_empty()
-            && delta == 0
-            && requested.iter().all(|r| r.bit_commitments().is_empty());
-
-        if is_zero_request {
-            // Verify one knowledge-of-randomness proof per request:
-            //   Statement: Ma = r * Gh
-            //   Witness:   r
-            if proofs.len() != requested.len() {
-                return Err(WabiSabiError::CoordinatorReceivedInvalidProofs);
-            }
-
-            let mut transcript = Transcript::new(b"zero_request");
-            let mut statements = Vec::with_capacity(requested.len());
-            for req in requested.iter() {
-                statements.push(Statement::new(
-                    req.ma().clone(),
-                    vec![Generators::gh().clone()],
-                ));
-            }
-
-            if !ProofSystem::verify(&mut transcript, &statements, proofs)? {
-                return Err(WabiSabiError::CoordinatorReceivedInvalidProofs);
-            }
-
-            return Ok(());
+        for presentation in presented {
+            let z_point = presentation.compute_z(&self.secret_key)?;
+            statements.push(show_credential_statement(presentation, &z_point, &self.parameters));
         }
 
-        // Real-amount path: aggregated proof system not yet implemented.
-        // Accept the request to allow downstream issuance code to run; the
-        // missing checks are tracked in the implementation status doc.
-        let _ = (delta, presented, requested, proofs);
-        Ok(())
+        let width = if is_null { 0 } else { self.range_proof_width };
+        for req in requested {
+            statements.push(if is_null {
+                zero_proof_statement(req.ma().clone())
+            } else {
+                issuance_request_statement(req, width)
+            });
+        }
+
+        if !is_null {
+            // Balance commitment B = delta·Gg + sum(Ca) - sum(Ma)  (matches C# CredentialIssuer.cs:213)
+            let mut bal = crate::crypto::GroupElement::infinity();
+            if request.delta() != 0 {
+                let delta_scalar = crate::crypto::Scalar::from_i64(request.delta());
+                bal = (bal + (&delta_scalar * Generators::gg())?)?;
+            }
+            for p in presented {
+                bal = (bal + p.ca().clone())?;
+            }
+            for r in requested {
+                bal = (bal + r.ma().negate()?)?;
+            }
+            statements.push(balance_proof_statement(bal));
+        }
+
+        Ok(statements)
     }
 
-    /// Create balance verification statement
-    fn create_balance_verification_statement(
+    /// Issue MACs and assemble per-credential issuer-parameter Knowledge.
+    fn issue_macs<R: WabiSabiRandom>(
         &self,
-        presented: &[crate::zero_knowledge::CredentialPresentation],
-        requested: &[crate::credential_requesting::IssuanceRequest],
-        delta: i64,
-        transcript: Option<&mut Transcript>,
-    ) -> Result<Statement> {
-        let mut generators = Vec::new();
-
-        // Start with zero point
-        let mut public_point = GroupElement::infinity();
-
-        // Add all presented Ca values
-        for presentation in presented.iter() {
-            public_point = (public_point + presentation.ca().clone())?;
-        }
-
-        // Subtract all requested Ma values
-        for request in requested.iter() {
-            let neg_ma = request.ma().negate()?;
-            public_point = (public_point + neg_ma)?;
-        }
-
-        // Add delta term
-        let delta_scalar = Scalar::from_i64(delta);
-        let delta_point = Generators::gg().multiply(&delta_scalar)?;
-        public_point = (public_point + delta_point)?;
-
-        // One Gh generator for each randomness term
-        for _ in 0..(presented.len() + requested.len()) {
-            generators.push(Generators::gh().clone());
-        }
-
-        Ok(Statement::new(public_point, generators))
-    }
-
-    /// Create range verification statement
-    fn create_range_verification_statement(
-        &self,
-        ma: &GroupElement,
-        bit_commitments: &[GroupElement],
-        transcript: Option<&mut Transcript>,
-    ) -> Result<Statement> {
-        let mut generators = Vec::new();
-
-        // Start with Ma
-        let mut public_point = ma.clone();
-
-        // Ma = sum(2^i * Ci), so we need Ma - sum(2^i * Ci) = 0
-        for (i, commitment) in bit_commitments.iter().enumerate() {
-            let power_of_two = Scalar::from_u64(1u64 << i);
-            let scaled_commitment = (&power_of_two * commitment)?;
-            let neg = scaled_commitment.negate()?;
-            public_point = (public_point + neg)?;
-        }
-
-        // Generators for randomness
-        for _ in 0..=bit_commitments.len() {
-            generators.push(Generators::gh().clone());
-        }
-
-        Ok(Statement::new(public_point, generators))
-    }
-
-    /// Issue credentials (MACs) for validated requests
-    fn issue_credentials<R: WabiSabiRandom>(
-        &self,
-        requested: &[crate::credential_requesting::IssuanceRequest],
+        requested: &[IssuanceRequest],
         random: &mut R,
-    ) -> Result<CredentialsResponse> {
-        let mut issued_credentials = Vec::new();
-        let mut proofs = Vec::new();
-
-        let mut transcript = Transcript::new(b"mac_issuance");
-
-        // Generate MACs and proofs for each request
-        for request in requested.iter() {
-            // Generate random t for MAC
+    ) -> Result<(Vec<Mac>, Vec<Knowledge>)> {
+        let mut macs = Vec::with_capacity(requested.len());
+        let mut knowledge = Vec::with_capacity(requested.len());
+        for req in requested {
             let t = random.get_scalar();
-
-            // Compute MAC
-            let mac = Mac::compute_mac(&self.secret_key, request.ma(), &t)?;
-            issued_credentials.push(mac.clone());
-
-            // Generate proof that MAC was correctly issued
-            let proof = self.generate_mac_issuance_proof(&mac, request.ma(), &mut transcript, random)?;
-            proofs.push(proof);
+            let mac = Mac::compute_mac(&self.secret_key, req.ma(), &t)?;
+            knowledge.push(issuer_parameters_knowledge(&mac, req.ma(), &self.secret_key)?);
+            macs.push(mac);
         }
-
-        Ok(CredentialsResponse::new(issued_credentials, proofs))
+        Ok((macs, knowledge))
     }
 
-    /// Generate a proof that a MAC was correctly issued
-    fn generate_mac_issuance_proof<R: WabiSabiRandom>(
-        &self,
-        mac: &Mac,
-        ma: &GroupElement,
-        transcript: &mut Transcript,
-        random: &mut R,
-    ) -> Result<crate::zero_knowledge::Proof> {
-        // Prove knowledge of (w, wp, ya) such that:
-        // Z' = V - x0*U - x1*t*U = w*Gw + wp*Gwp + ya*Ma
-
-        let z_prime = mac.compute_z_prime(&self.secret_key.x0, &self.secret_key.x1)?;
-
-        let statement = Statement::new(
-            z_prime,
-            vec![
-                Generators::gw().clone(),
-                Generators::gwp().clone(),
-                ma.clone(),
-            ],
-        );
-
-        let witness = ScalarVector::new(vec![
-            self.secret_key.w,
-            self.secret_key.wp,
-            self.secret_key.ya,
-        ]);
-
-        let knowledge = Knowledge::new(statement, witness)?;
-
-        let proofs = ProofSystem::prove(transcript, &[knowledge], random)?;
-
-        Ok(proofs.into_iter().next().unwrap())
-    }
-
-    /// Reset the issuer state (for testing)
+    /// Reset state for tests.
     #[cfg(test)]
     pub fn reset(&self, new_balance: i64) {
         self.balance.store(new_balance, Ordering::SeqCst);
@@ -338,7 +240,6 @@ mod tests {
         let mut random = SecureRandom::new();
         let sk = CredentialIssuerSecretKey::new(&mut random);
         let issuer = CredentialIssuer::new(sk, 1_000_000).unwrap();
-
         assert_eq!(issuer.balance(), 1_000_000);
     }
 
@@ -348,40 +249,15 @@ mod tests {
         let sk = CredentialIssuerSecretKey::new(&mut random);
         let params = sk.compute_parameters().unwrap();
         let issuer = CredentialIssuer::new(sk, 1_000_000).unwrap();
-
         let client = WabiSabiClient::new(params);
-        let (request, _randomness) = client
-            .create_request_for_zero_amount(&mut random)
-            .unwrap();
 
-        let response = issuer.handle_request(&request, &mut random);
-        assert!(response.is_ok());
-
-        // Balance unchanged for zero-value credentials
+        let (request, validation) = client.create_request_for_zero_amount(&mut random).unwrap();
+        let response = issuer.handle_request(&request, &mut random).unwrap();
+        let creds = client.handle_response(&response, validation).unwrap();
+        assert_eq!(creds.len(), CREDENTIAL_NUMBER);
+        for c in &creds {
+            assert_eq!(c.value(), 0);
+        }
         assert_eq!(issuer.balance(), 1_000_000);
-    }
-
-    #[test]
-    fn test_prevent_negative_balance() {
-        let mut random = SecureRandom::new();
-        let sk = CredentialIssuerSecretKey::new(&mut random);
-        let issuer = CredentialIssuer::new(sk, 100).unwrap();
-
-        // This would require more balance than available
-        // (We'd need a proper client request that requests more than balance)
-        // This is a simplified test of the balance check logic
-        let current = issuer.balance();
-        assert_eq!(current, 100);
-    }
-
-    #[test]
-    fn test_serial_number_tracking() {
-        let mut random = SecureRandom::new();
-        let sk = CredentialIssuerSecretKey::new(&mut random);
-        let issuer = CredentialIssuer::new(sk, 1_000_000).unwrap();
-
-        // Serial numbers start empty
-        let seen = issuer.serial_numbers.lock().unwrap();
-        assert_eq!(seen.len(), 0);
     }
 }

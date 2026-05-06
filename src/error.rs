@@ -65,6 +65,9 @@ pub enum WabiSabiError {
 
     #[error("Invalid parameter")]
     InvalidParameter,
+
+    #[error("Invalid amount")]
+    InvalidAmount,
 }
 
 /// Result type for WabiSabi operations

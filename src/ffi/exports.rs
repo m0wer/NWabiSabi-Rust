@@ -129,10 +129,13 @@ pub unsafe extern "C" fn wabisabi_client_create_zero_request(
     let client = &*(client as *const WabiSabiClient);
     let random = &mut *(random as *mut SecureRandom);
 
-    let (request, randomness) = ffi_try!(client.create_request_for_zero_amount(random), error);
+    let (request, validation) = ffi_try!(client.create_request_for_zero_amount(random), error);
 
-    // Store randomness in output parameter
+    // FFI exposes only the randomness scalars for now; the PyO3 binding (in
+    // progress) carries the full validation state.
     if !randomness_out.is_null() {
+        let randomness: Vec<_> =
+            validation.validation_data.iter().map(|d| d.randomness.clone()).collect();
         *randomness_out = FFIScalarArray::from_vec(randomness);
     }
 
