@@ -1,5 +1,6 @@
 use crate::crypto::{GroupElement, Scalar};
 use crate::crypto::randomness::WabiSabiRandom;
+use crate::error::{Result, WabiSabiError};
 use serde::{Deserialize, Serialize};
 
 /// Credential issuer secret key (5 random scalars)
@@ -13,15 +14,48 @@ pub struct CredentialIssuerSecretKey {
 }
 
 impl CredentialIssuerSecretKey {
-    /// Generate a new random secret key
+    /// Generate a new random secret key. Loops on the (cryptographically
+    /// negligible) chance that the source ever yields zero, so the resulting
+    /// key always satisfies `try_from_scalars`.
     pub fn new<R: WabiSabiRandom>(rng: &mut R) -> Self {
-        Self {
-            w: rng.get_scalar(),
-            wp: rng.get_scalar(),
-            x0: rng.get_scalar(),
-            x1: rng.get_scalar(),
-            ya: rng.get_scalar(),
+        loop {
+            let w = rng.get_scalar();
+            let wp = rng.get_scalar();
+            let x0 = rng.get_scalar();
+            let x1 = rng.get_scalar();
+            let ya = rng.get_scalar();
+            if let Ok(sk) = Self::try_from_scalars(w, wp, x0, x1, ya) {
+                return sk;
+            }
         }
+    }
+
+    /// Construct from explicit scalars; rejects any zero component (which
+    /// would make the credential system trivially insecure). The error names
+    /// the offending field, mirroring the C# `ArgumentException` parameter.
+    pub fn try_from_scalars(
+        w: Scalar,
+        wp: Scalar,
+        x0: Scalar,
+        x1: Scalar,
+        ya: Scalar,
+    ) -> Result<Self> {
+        if w.is_zero() {
+            return Err(WabiSabiError::ZeroScalar { name: "w" });
+        }
+        if wp.is_zero() {
+            return Err(WabiSabiError::ZeroScalar { name: "wp" });
+        }
+        if x0.is_zero() {
+            return Err(WabiSabiError::ZeroScalar { name: "x0" });
+        }
+        if x1.is_zero() {
+            return Err(WabiSabiError::ZeroScalar { name: "x1" });
+        }
+        if ya.is_zero() {
+            return Err(WabiSabiError::ZeroScalar { name: "ya" });
+        }
+        Ok(Self { w, wp, x0, x1, ya })
     }
 
     /// Compute the public parameters from this secret key
@@ -56,6 +90,20 @@ pub struct CredentialIssuerParameters {
     pub cw: GroupElement,
     /// I = ya*Ga
     pub i: GroupElement,
+}
+
+impl CredentialIssuerParameters {
+    /// Construct from group elements; rejects the point at infinity to match
+    /// the C# constructor.
+    pub fn try_new(cw: GroupElement, i: GroupElement) -> Result<Self> {
+        if cw.is_infinity() {
+            return Err(WabiSabiError::PointAtInfinity { name: "cw" });
+        }
+        if i.is_infinity() {
+            return Err(WabiSabiError::PointAtInfinity { name: "i" });
+        }
+        Ok(Self { cw, i })
+    }
 }
 
 #[cfg(test)]

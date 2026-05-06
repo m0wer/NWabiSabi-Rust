@@ -68,6 +68,12 @@ pub enum WabiSabiError {
 
     #[error("Invalid amount")]
     InvalidAmount,
+
+    #[error("Value cannot be zero. (Parameter '{name}')")]
+    ZeroScalar { name: &'static str },
+
+    #[error("Point at infinity is not a valid value. (Parameter '{name}')")]
+    PointAtInfinity { name: &'static str },
 }
 
 /// Result type for WabiSabi operations
