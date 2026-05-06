@@ -13,11 +13,14 @@ pub struct Knowledge {
 
 impl Knowledge {
     /// Create new knowledge from a statement and witness
+    ///
+    /// Every equation in the statement must have a generator vector whose
+    /// length matches the witness. Equations with unused witness components
+    /// must use [`GroupElement::infinity`] as a placeholder generator (this
+    /// is what [`Statement::from_matrix`] produces).
     pub fn new(statement: Statement, witness: ScalarVector) -> Result<Self> {
-        // Check that witness size matches the generators in the first equation
-        // (all equations share the same witness structure)
-        if let Some(first_eq) = statement.equations.first() {
-            if witness.len() != first_eq.generators.len() {
+        for equation in &statement.equations {
+            if witness.len() != equation.generators.len() {
                 return Err(crate::error::WabiSabiError::Unspecified);
             }
         }

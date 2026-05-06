@@ -3,6 +3,7 @@ pub mod nonce_provider;
 pub mod linear_relation;
 pub mod proof;
 pub mod proof_system;
+pub mod statements;
 pub mod credential;
 pub mod credential_presentation;
 
