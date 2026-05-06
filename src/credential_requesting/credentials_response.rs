@@ -37,13 +37,19 @@ impl CredentialsResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::{GroupElement, Scalar};
+    use crate::crypto::issuer_key::CredentialIssuerSecretKey;
+    use crate::crypto::randomness::{SecureRandom, WabiSabiRandom};
+    use crate::crypto::Generators;
 
     #[test]
     fn test_credentials_response_creation() {
-        let t = Scalar::one();
-        let v = GroupElement::infinity();
-        let mac = Mac::new(t, v).unwrap();
+        let mut rng = SecureRandom::new();
+        let sk = CredentialIssuerSecretKey::new(&mut rng);
+
+        let ma_scalar = rng.get_scalar();
+        let ma = (&ma_scalar * Generators::ga()).unwrap();
+        let t = rng.get_scalar();
+        let mac = Mac::compute_mac(&sk, &ma, &t).unwrap();
 
         let response = CredentialsResponse::new(vec![mac], vec![]);
 

@@ -732,11 +732,15 @@ fn test_negative_value_rejected() {
     let mut rng = SecureRandom::new();
     let randomness = rng.get_scalar();
     let t = rng.get_scalar();
-    let v = GroupElement::infinity();
-    // Create a MAC using the public API
+    // Build a real Ma so that compute_mac succeeds; the negativity check is
+    // on the Credential constructor, independent of the underlying MAC.
     let mut rng2 = SecureRandom::new();
     let dummy_sk = CredentialIssuerSecretKey::new(&mut rng2);
-    let mac = Mac::compute_mac(&dummy_sk, &v, &t).unwrap();
+    let value_scalar = Scalar::from_u64(1_000);
+    let ma = ((value_scalar * Generators::gg()).unwrap()
+        + (randomness * Generators::gh()).unwrap())
+    .unwrap();
+    let mac = Mac::compute_mac(&dummy_sk, &ma, &t).unwrap();
 
     // Negative value should be rejected
     let result = Credential::new(-1000, randomness, mac);

@@ -99,12 +99,7 @@ fn test_credential_creation() {
     let randomness = rng.get_scalar();
 
     // Create attribute Ma (Pedersen commitment)
-    let value_scalar = Scalar::from_bytes(&{
-        let mut bytes = [0u8; 32];
-        bytes[..8].copy_from_slice(&(value as u64).to_le_bytes());
-        bytes
-    })
-    .unwrap();
+    let value_scalar = Scalar::from_u64(value as u64);
 
     let ma = ((value_scalar * Generators::gg()).unwrap()
         + (randomness * Generators::gh()).unwrap())
@@ -128,12 +123,7 @@ fn test_credential_presentation() {
     let value = 50_000i64;
     let randomness = rng.get_scalar();
 
-    let value_scalar = Scalar::from_bytes(&{
-        let mut bytes = [0u8; 32];
-        bytes[..8].copy_from_slice(&(value as u64).to_le_bytes());
-        bytes
-    })
-    .unwrap();
+    let value_scalar = Scalar::from_u64(value as u64);
 
     let ma = ((value_scalar * Generators::gg()).unwrap()
         + (randomness * Generators::gh()).unwrap())
@@ -164,12 +154,7 @@ fn test_credential_presentation_compute_z() {
     let value = 25_000i64;
     let randomness = rng.get_scalar();
 
-    let value_scalar = Scalar::from_bytes(&{
-        let mut bytes = [0u8; 32];
-        bytes[..8].copy_from_slice(&(value as u64).to_le_bytes());
-        bytes
-    })
-    .unwrap();
+    let value_scalar = Scalar::from_u64(value as u64);
 
     let ma = ((value_scalar * Generators::gg()).unwrap()
         + (randomness * Generators::gh()).unwrap())
@@ -202,12 +187,7 @@ fn test_different_randomizations_produce_different_presentations() {
     let value = 75_000i64;
     let randomness = rng.get_scalar();
 
-    let value_scalar = Scalar::from_bytes(&{
-        let mut bytes = [0u8; 32];
-        bytes[..8].copy_from_slice(&(value as u64).to_le_bytes());
-        bytes
-    })
-    .unwrap();
+    let value_scalar = Scalar::from_u64(value as u64);
 
     let ma = ((value_scalar * Generators::gg()).unwrap()
         + (randomness * Generators::gh()).unwrap())

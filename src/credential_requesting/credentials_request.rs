@@ -114,16 +114,23 @@ impl CredentialsRequest for RealCredentialsRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::randomness::{SecureRandom, WabiSabiRandom};
     use crate::crypto::GroupElement;
-    use crate::crypto::{GroupElementVector, ScalarVector};
+    use crate::crypto::{Generators, GroupElementVector, ScalarVector};
 
     #[test]
     fn test_zero_credentials_request() {
+        let mut rng = SecureRandom::new();
         let ma = GroupElement::infinity();
         let request = IssuanceRequest::new(ma, vec![]);
 
-        let nonces = GroupElementVector::new(vec![GroupElement::infinity()]);
-        let responses = ScalarVector::new(vec![]);
+        // Build a syntactically valid (but unverified) proof: at least one
+        // non-infinity public nonce and at least one response. This exercises
+        // the request container, not the proof system.
+        let nonce_scalar = rng.get_scalar();
+        let nonce_point = (&nonce_scalar * Generators::gg()).unwrap();
+        let nonces = GroupElementVector::new(vec![nonce_point]);
+        let responses = ScalarVector::new(vec![rng.get_scalar()]);
         let proof = Proof::new(nonces, responses);
 
         let zero_request = ZeroCredentialsRequest::new(vec![request], vec![proof]);
