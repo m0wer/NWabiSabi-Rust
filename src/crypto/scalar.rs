@@ -1,34 +1,196 @@
+//! Scalars over the secp256k1 group order, backed by `k256::Scalar`.
+//!
+//! This module exposes a thin newtype around `k256::Scalar` that provides the
+//! arithmetic the rest of the WabiSabi crate needs: add / sub / mul / neg /
+//! inverse / equality, plus serialization as 32 big-endian bytes (matching the
+//! reference C# WalletWasabi serialization).
+
 use crate::error::{Result, WabiSabiError};
+use elliptic_curve::ff::PrimeField;
+use elliptic_curve::ops::Reduce;
+use k256::Scalar as KScalar;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::ops::{Add, Mul, Neg, Sub};
+use subtle::ConstantTimeEq;
 
-/// secp256k1 curve order (n) in big-endian
-const SECP256K1_ORDER: [u8; 32] = [
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
-    0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B, 0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41,
-];
+/// Wrapper around `k256::Scalar` for field operations on the secp256k1 scalar group.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Scalar(KScalar);
 
-/// Wrapper around secp256k1 scalar for field operations
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Scalar(#[serde(with = "scalar_serde")] secp256k1::Scalar);
-
-mod scalar_serde {
-    use serde::{Deserializer, Serializer};
-
-    pub fn serialize<S>(scalar: &secp256k1::Scalar, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let bytes = scalar.to_be_bytes();
-        serde_bytes::serialize(&bytes[..], serializer)
+impl Scalar {
+    /// Zero scalar.
+    pub fn zero() -> Self {
+        Self(KScalar::ZERO)
     }
 
-    pub fn deserialize<'de, D>(deserializer: D) -> std::result::Result<secp256k1::Scalar, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
+    /// One scalar.
+    pub fn one() -> Self {
+        Self(KScalar::ONE)
+    }
+
+    /// Generate a uniformly random scalar.
+    pub fn random<R: Rng>(rng: &mut R) -> Self {
+        // k256::Scalar::random uses a CryptoRng; we wrap any Rng by sampling
+        // 32 bytes and reducing.
+        let mut bytes = [0u8; 32];
+        rng.fill(&mut bytes);
+        Self(<KScalar as Reduce<k256::U256>>::reduce_bytes(&bytes.into()))
+    }
+
+    /// Construct from 32 big-endian bytes. Returns `Err` if the value is >= n.
+    pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self> {
+        let opt = KScalar::from_repr((*bytes).into());
+        if bool::from(opt.is_some()) {
+            Ok(Self(opt.unwrap()))
+        } else {
+            Err(WabiSabiError::InvalidScalar)
+        }
+    }
+
+    /// Construct from 32 big-endian bytes, reducing modulo n.
+    pub fn from_bytes_reduced(bytes: &[u8; 32]) -> Self {
+        Self(<KScalar as Reduce<k256::U256>>::reduce_bytes(bytes.into()))
+    }
+
+    /// Construct from a `u64` (always succeeds; value < n).
+    pub fn from_u64(value: u64) -> Self {
+        // k256::Scalar implements From<u64>.
+        Self(KScalar::from(value))
+    }
+
+    /// Construct from an `i64`. Negative values are mapped to their additive
+    /// inverse modulo n. Always succeeds.
+    pub fn from_i64(value: i64) -> Self {
+        if value >= 0 {
+            Self::from_u64(value as u64)
+        } else {
+            // -|value| mod n
+            let abs = (value as i128).unsigned_abs() as u64;
+            Self::from_u64(abs).negate()
+        }
+    }
+
+    /// Convenience: build directly from a `k256::Scalar`.
+    pub(crate) fn from_inner(s: KScalar) -> Self {
+        Self(s)
+    }
+
+    /// Borrow the underlying `k256::Scalar`.
+    pub(crate) fn inner(&self) -> &KScalar {
+        &self.0
+    }
+
+    /// Serialize as 32 big-endian bytes.
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.0.to_bytes().into()
+    }
+
+    /// Negate (`n - self mod n`). `0` negates to `0`.
+    pub fn negate(&self) -> Self {
+        Self(self.0.negate())
+    }
+
+    /// Multiplicative inverse. Returns `Err` for the zero scalar.
+    pub fn invert(&self) -> Result<Self> {
+        let inv = self.0.invert();
+        if bool::from(inv.is_some()) {
+            Ok(Self(inv.unwrap()))
+        } else {
+            Err(WabiSabiError::InvalidScalar)
+        }
+    }
+
+    /// Constant-time check for zero.
+    pub fn is_zero(&self) -> bool {
+        bool::from(self.0.is_zero())
+    }
+}
+
+// -- Operator impls ---------------------------------------------------------
+
+impl Add for Scalar {
+    type Output = Self;
+    fn add(self, other: Self) -> Self {
+        Self(self.0 + other.0)
+    }
+}
+
+impl Sub for Scalar {
+    type Output = Self;
+    fn sub(self, other: Self) -> Self {
+        Self(self.0 - other.0)
+    }
+}
+
+impl Mul for Scalar {
+    type Output = Self;
+    fn mul(self, other: Self) -> Self {
+        Self(self.0 * other.0)
+    }
+}
+
+impl Neg for Scalar {
+    type Output = Self;
+    fn neg(self) -> Self {
+        self.negate()
+    }
+}
+
+impl Add for &Scalar {
+    type Output = Scalar;
+    fn add(self, other: Self) -> Scalar {
+        Scalar(self.0 + other.0)
+    }
+}
+
+impl Sub for &Scalar {
+    type Output = Scalar;
+    fn sub(self, other: Self) -> Scalar {
+        Scalar(self.0 - other.0)
+    }
+}
+
+impl Mul for &Scalar {
+    type Output = Scalar;
+    fn mul(self, other: Self) -> Scalar {
+        Scalar(self.0 * other.0)
+    }
+}
+
+impl PartialEq for Scalar {
+    fn eq(&self, other: &Self) -> bool {
+        bool::from(self.0.ct_eq(&other.0))
+    }
+}
+
+impl Eq for Scalar {}
+
+impl std::hash::Hash for Scalar {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.to_bytes().hash(state);
+    }
+}
+
+impl From<u64> for Scalar {
+    fn from(value: u64) -> Self {
+        Self::from_u64(value)
+    }
+}
+
+// -- Serde -----------------------------------------------------------------
+
+impl Serialize for Scalar {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        let bytes = self.to_bytes();
+        serde_bytes::serialize(&bytes[..], serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Scalar {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         let bytes: Vec<u8> = serde_bytes::deserialize(deserializer)?;
         if bytes.len() != 32 {
             return Err(serde::de::Error::custom(format!(
@@ -36,398 +198,13 @@ mod scalar_serde {
                 bytes.len()
             )));
         }
-        let mut array = [0u8; 32];
-        array.copy_from_slice(&bytes);
-        secp256k1::Scalar::from_be_bytes(array)
-            .map_err(|_| serde::de::Error::custom("Invalid scalar bytes"))
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Self::from_bytes(&arr).map_err(|_| serde::de::Error::custom("scalar >= group order"))
     }
 }
 
-impl Scalar {
-    /// Zero scalar
-    pub fn zero() -> Self {
-        Self(secp256k1::Scalar::ZERO)
-    }
-
-    /// One scalar
-    pub fn one() -> Self {
-        Self(secp256k1::Scalar::ONE)
-    }
-
-    /// Generate a random scalar
-    pub fn random<R: Rng>(rng: &mut R) -> Self {
-        let mut bytes = [0u8; 32];
-        loop {
-            rng.fill(&mut bytes);
-            if let Ok(scalar) = secp256k1::Scalar::from_be_bytes(bytes) {
-                return Self(scalar);
-            }
-        }
-    }
-
-    /// Create scalar from big-endian bytes
-    pub fn from_bytes(bytes: &[u8; 32]) -> Result<Self> {
-        secp256k1::Scalar::from_be_bytes(*bytes)
-            .map(Self)
-            .map_err(|_| WabiSabiError::InvalidScalar)
-    }
-
-    /// Create scalar from an i64 value
-    pub fn from_i64(value: i64) -> Result<Self> {
-        // Convert i64 to little-endian bytes, then to scalar
-        let mut bytes = [0u8; 32];
-        let value_bytes = value.to_le_bytes();
-        bytes[..8].copy_from_slice(&value_bytes);
-
-        // For negative values, we need proper two's complement representation
-        if value < 0 {
-            // Fill the upper bytes with 0xFF for sign extension
-            bytes[8..].fill(0xFF);
-        }
-
-        // Convert from little-endian to big-endian for secp256k1
-        bytes.reverse();
-
-        Self::from_bytes(&bytes)
-    }
-
-    /// Convert scalar to big-endian bytes
-    pub fn to_bytes(&self) -> [u8; 32] {
-        self.0.to_be_bytes()
-    }
-
-    /// Negate the scalar (n - self mod n)
-    pub fn negate(&self) -> Self {
-        if self.is_zero() {
-            return *self;
-        }
-        // Compute n - self
-        let self_bytes = self.0.to_be_bytes();
-        let result = scalar_sub_mod_n(&SECP256K1_ORDER, &self_bytes);
-        Self(secp256k1::Scalar::from_be_bytes(result).expect("negation should produce valid scalar"))
-    }
-
-    /// Get the underlying secp256k1 scalar
-    pub(crate) fn inner(&self) -> &secp256k1::Scalar {
-        &self.0
-    }
-
-    /// Create from inner secp256k1 scalar
-    pub(crate) fn from_inner(inner: secp256k1::Scalar) -> Self {
-        Self(inner)
-    }
-
-    /// Check if scalar is zero
-    pub fn is_zero(&self) -> bool {
-        self.0 == secp256k1::Scalar::ZERO
-    }
-
-    /// Create scalar from u64
-    pub fn from_u64(value: u64) -> Result<Self> {
-        let mut bytes = [0u8; 32];
-        bytes[24..].copy_from_slice(&value.to_be_bytes());
-        Self::from_bytes(&bytes)
-    }
-}
-
-impl Add for Scalar {
-    type Output = Self;
-
-    fn add(self, other: Self) -> Self {
-        let a = self.0.to_be_bytes();
-        let b = other.0.to_be_bytes();
-        let result = scalar_add_mod_n(&a, &b);
-        Self(secp256k1::Scalar::from_be_bytes(result).expect("addition should produce valid scalar"))
-    }
-}
-
-impl Sub for Scalar {
-    type Output = Self;
-
-    fn sub(self, other: Self) -> Self {
-        self + other.negate()
-    }
-}
-
-impl Mul for Scalar {
-    type Output = Self;
-
-    fn mul(self, other: Self) -> Self {
-        let a = self.0.to_be_bytes();
-        let b = other.0.to_be_bytes();
-        let result = scalar_mul_mod_n(&a, &b);
-        Self(secp256k1::Scalar::from_be_bytes(result).expect("multiplication should produce valid scalar"))
-    }
-}
-
-impl Neg for Scalar {
-    type Output = Self;
-
-    fn neg(self) -> Self {
-        self.negate()
-    }
-}
-
-impl Default for Scalar {
-    fn default() -> Self {
-        Self::zero()
-    }
-}
-
-impl From<u64> for Scalar {
-    fn from(value: u64) -> Self {
-        Self::from_u64(value).expect("u64 should always fit in a scalar")
-    }
-}
-
-impl Mul for &Scalar {
-    type Output = Scalar;
-
-    fn mul(self, other: Self) -> Scalar {
-        *self * *other
-    }
-}
-
-impl Add for &Scalar {
-    type Output = Scalar;
-
-    fn add(self, other: Self) -> Scalar {
-        *self + *other
-    }
-}
-
-impl Sub for &Scalar {
-    type Output = Scalar;
-
-    fn sub(self, other: Self) -> Scalar {
-        *self - *other
-    }
-}
-
-// Helper functions for scalar arithmetic modulo n
-
-/// Add two 256-bit big-endian integers (no reduction)
-fn add_256(a: &[u8; 32], b: &[u8; 32]) -> ([u8; 32], bool) {
-    let mut result = [0u8; 32];
-    let mut carry: u16 = 0;
-
-    for i in (0..32).rev() {
-        let sum = (a[i] as u16) + (b[i] as u16) + carry;
-        result[i] = sum as u8;
-        carry = sum >> 8;
-    }
-
-    (result, carry > 0)
-}
-
-/// Subtract two 256-bit big-endian integers (a - b), returns (result, borrowed)
-fn sub_256(a: &[u8; 32], b: &[u8; 32]) -> ([u8; 32], bool) {
-    let mut result = [0u8; 32];
-    let mut borrow: i16 = 0;
-
-    for i in (0..32).rev() {
-        let diff = (a[i] as i16) - (b[i] as i16) - borrow;
-        if diff < 0 {
-            result[i] = (diff + 256) as u8;
-            borrow = 1;
-        } else {
-            result[i] = diff as u8;
-            borrow = 0;
-        }
-    }
-
-    (result, borrow > 0)
-}
-
-/// Add two 256-bit big-endian integers modulo n
-fn scalar_add_mod_n(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-    let (result, carry) = add_256(a, b);
-
-    // Reduce modulo n if result >= n
-    if carry || compare_be(&result, &SECP256K1_ORDER) >= 0 {
-        let (reduced, _) = sub_256(&result, &SECP256K1_ORDER);
-        return reduced;
-    }
-
-    result
-}
-
-/// Subtract two 256-bit big-endian integers modulo n
-fn scalar_sub_mod_n(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-    let (result, borrowed) = sub_256(a, b);
-
-    // If there's a borrow, we need to add n back
-    if borrowed {
-        let (added, _) = add_256(&result, &SECP256K1_ORDER);
-        return added;
-    }
-
-    result
-}
-
-/// Multiply two 256-bit big-endian integers modulo n
-fn scalar_mul_mod_n(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-    // Use 512-bit intermediate result
-    let mut product = [0u64; 8]; // 8 x 64-bit = 512 bits
-
-    // Convert to 32-bit limbs for easier multiplication (big-endian)
-    let a_limbs: [u64; 4] = [
-        u64::from_be_bytes([a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]]),
-        u64::from_be_bytes([a[8], a[9], a[10], a[11], a[12], a[13], a[14], a[15]]),
-        u64::from_be_bytes([a[16], a[17], a[18], a[19], a[20], a[21], a[22], a[23]]),
-        u64::from_be_bytes([a[24], a[25], a[26], a[27], a[28], a[29], a[30], a[31]]),
-    ];
-    let b_limbs: [u64; 4] = [
-        u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
-        u64::from_be_bytes([b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]]),
-        u64::from_be_bytes([b[16], b[17], b[18], b[19], b[20], b[21], b[22], b[23]]),
-        u64::from_be_bytes([b[24], b[25], b[26], b[27], b[28], b[29], b[30], b[31]]),
-    ];
-
-    // Schoolbook multiplication with 32-bit limbs to avoid overflow
-    for i in 0..4 {
-        for j in 0..4 {
-            let a_lo = a_limbs[3 - i] & 0xFFFF_FFFF;
-            let a_hi = a_limbs[3 - i] >> 32;
-            let b_lo = b_limbs[3 - j] & 0xFFFF_FFFF;
-            let b_hi = b_limbs[3 - j] >> 32;
-
-            // Karatsuba-style splitting to avoid overflow
-            let lo_lo = a_lo * b_lo;
-            let hi_hi = a_hi * b_hi;
-            let mid1 = a_lo * b_hi;
-            let mid2 = a_hi * b_lo;
-
-            // Add to product array
-            let idx = 7 - (i + j) / 2;
-            let idx2 = 7 - ((i + j) / 2 + 1);
-            let shift = ((i + j) % 2) * 32;
-
-            if shift == 0 {
-                let (sum, overflow1) = product[idx].overflowing_add(lo_lo);
-                product[idx] = sum;
-                if overflow1 && idx > 0 {
-                    product[idx - 1] = product[idx - 1].wrapping_add(1);
-                }
-
-                let (sum, _) = product[idx].overflowing_add((mid1 & 0xFFFF_FFFF) << 32);
-                product[idx] = sum;
-                let (sum, _) = product[idx].overflowing_add((mid2 & 0xFFFF_FFFF) << 32);
-                product[idx] = sum;
-
-                if idx > 0 {
-                    product[idx - 1] = product[idx - 1].wrapping_add(mid1 >> 32);
-                    product[idx - 1] = product[idx - 1].wrapping_add(mid2 >> 32);
-                    product[idx - 1] = product[idx - 1].wrapping_add(hi_hi);
-                }
-            } else {
-                // Cross-limb case
-                let (sum, _) = product[idx].overflowing_add(lo_lo << 32);
-                product[idx] = sum;
-                if idx > 0 {
-                    product[idx - 1] = product[idx - 1].wrapping_add(lo_lo >> 32);
-                    product[idx - 1] = product[idx - 1].wrapping_add(mid1);
-                    product[idx - 1] = product[idx - 1].wrapping_add(mid2);
-                }
-                if idx > 1 {
-                    product[idx - 2] = product[idx - 2].wrapping_add(hi_hi);
-                }
-            }
-        }
-    }
-
-    // Reduce modulo n using simple division
-    reduce_mod_n(&product)
-}
-
-/// Compare two 32-byte big-endian numbers
-/// Returns: -1 if a < b, 0 if a == b, 1 if a > b
-fn compare_be(a: &[u8; 32], b: &[u8; 32]) -> i32 {
-    for i in 0..32 {
-        if a[i] < b[i] {
-            return -1;
-        }
-        if a[i] > b[i] {
-            return 1;
-        }
-    }
-    0
-}
-
-/// Reduce a 512-bit number modulo n
-fn reduce_mod_n(product: &[u64; 8]) -> [u8; 32] {
-    // Convert product to bytes
-    let mut bytes = [0u8; 64];
-    for (i, &limb) in product.iter().enumerate() {
-        let limb_bytes = limb.to_be_bytes();
-        bytes[i * 8..(i + 1) * 8].copy_from_slice(&limb_bytes);
-    }
-
-    // Simple reduction: repeatedly subtract n while >= n
-    // Start from high bytes
-    let n_extended = {
-        let mut n = [0u8; 64];
-        n[32..64].copy_from_slice(&SECP256K1_ORDER);
-        n
-    };
-
-    let mut result = bytes;
-
-    // Reduce by subtracting 2^256 * n, 2^224 * n, etc.
-    // For simplicity, we do a series of conditional subtractions
-    for shift in (0..=32).rev() {
-        let mut shifted_n = [0u8; 64];
-        let start = 32 - shift;
-        if start + 32 <= 64 {
-            shifted_n[start..start + 32].copy_from_slice(&SECP256K1_ORDER);
-
-            while compare_64(&result, &shifted_n) >= 0 {
-                result = sub_64(&result, &shifted_n);
-            }
-        }
-    }
-
-    // Extract lower 32 bytes
-    let mut output = [0u8; 32];
-    output.copy_from_slice(&result[32..64]);
-
-    // Final reduction
-    while compare_be(&output, &SECP256K1_ORDER) >= 0 {
-        output = scalar_sub_mod_n(&output, &SECP256K1_ORDER);
-    }
-
-    output
-}
-
-fn compare_64(a: &[u8; 64], b: &[u8; 64]) -> i32 {
-    for i in 0..64 {
-        if a[i] < b[i] {
-            return -1;
-        }
-        if a[i] > b[i] {
-            return 1;
-        }
-    }
-    0
-}
-
-fn sub_64(a: &[u8; 64], b: &[u8; 64]) -> [u8; 64] {
-    let mut result = [0u8; 64];
-    let mut borrow: i16 = 0;
-
-    for i in (0..64).rev() {
-        let diff = (a[i] as i16) - (b[i] as i16) - borrow;
-        if diff < 0 {
-            result[i] = (diff + 256) as u8;
-            borrow = 1;
-        } else {
-            result[i] = diff as u8;
-            borrow = 0;
-        }
-    }
-
-    result
-}
+// -- Tests -----------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -435,32 +212,60 @@ mod tests {
     use rand::thread_rng;
 
     #[test]
-    fn test_scalar_zero_one() {
+    fn zero_one() {
         assert!(Scalar::zero().is_zero());
         assert!(!Scalar::one().is_zero());
+        assert_eq!(Scalar::zero() + Scalar::one(), Scalar::one());
     }
 
     #[test]
-    fn test_scalar_addition() {
-        let a = Scalar::one();
-        let b = Scalar::one();
-        let c = a + b;
-        assert_ne!(c, Scalar::zero());
-    }
-
-    #[test]
-    fn test_scalar_negation() {
-        let a = Scalar::one();
-        let neg_a = a.negate();
-        assert_eq!(a + neg_a, Scalar::zero());
-    }
-
-    #[test]
-    fn test_scalar_serialization() {
+    fn addition_commutes() {
         let mut rng = thread_rng();
-        let scalar = Scalar::random(&mut rng);
-        let bytes = scalar.to_bytes();
-        let deserialized = Scalar::from_bytes(&bytes).unwrap();
-        assert_eq!(scalar, deserialized);
+        let a = Scalar::random(&mut rng);
+        let b = Scalar::random(&mut rng);
+        assert_eq!(a + b, b + a);
+    }
+
+    #[test]
+    fn negation_round_trip() {
+        let mut rng = thread_rng();
+        let a = Scalar::random(&mut rng);
+        assert_eq!(a + a.negate(), Scalar::zero());
+        assert_eq!(-a, a.negate());
+    }
+
+    #[test]
+    fn invert_round_trip() {
+        let mut rng = thread_rng();
+        let a = Scalar::random(&mut rng);
+        let inv = a.invert().unwrap();
+        assert_eq!(a * inv, Scalar::one());
+        assert!(Scalar::zero().invert().is_err());
+    }
+
+    #[test]
+    fn from_u64_matches_repeated_addition() {
+        let s = Scalar::from_u64(5);
+        let mut acc = Scalar::zero();
+        for _ in 0..5 {
+            acc = acc + Scalar::one();
+        }
+        assert_eq!(s, acc);
+    }
+
+    #[test]
+    fn from_i64_negative() {
+        let pos = Scalar::from_u64(7);
+        let neg = Scalar::from_i64(-7);
+        assert_eq!(pos + neg, Scalar::zero());
+    }
+
+    #[test]
+    fn serde_round_trip() {
+        let mut rng = thread_rng();
+        let a = Scalar::random(&mut rng);
+        let bytes = a.to_bytes();
+        let b = Scalar::from_bytes(&bytes).unwrap();
+        assert_eq!(a, b);
     }
 }

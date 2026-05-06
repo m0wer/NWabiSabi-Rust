@@ -1,21 +1,12 @@
 use crate::crypto::{GroupElement, Scalar};
+use elliptic_curve::ff::PrimeField;
+use k256::{FieldBytes, ProjectivePoint};
 use lazy_static::lazy_static;
 use sha2::{Digest, Sha256};
 
 lazy_static! {
     /// Base point defined in the secp256k1 standard (ECDSA generator)
-    pub static ref G: GroupElement = {
-        let secp = secp256k1::Secp256k1::new();
-        let generator = secp256k1::PublicKey::from_secret_key(
-            &secp,
-            &secp256k1::SecretKey::from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01])
-                .expect("valid secret key")
-        );
-        GroupElement::from_public_key(generator)
-    };
+    pub static ref G: GroupElement = GroupElement::from_projective(ProjectivePoint::GENERATOR);
 
     /// Generator point for MAC and Show
     pub static ref GW: GroupElement = from_text("Gw");
@@ -122,53 +113,66 @@ impl Generators {
     }
 }
 
-/// Deterministically creates a group element from the given text
-/// Uses SHA256 hash-to-curve construction
+/// Deterministically creates a group element from the given text.
+///
+/// Matches the WalletWasabi C# `GroupElement.FromText` construction:
+/// hash the input with SHA256, treat the digest as a candidate x coordinate,
+/// compute `y = sqrt(x^3 + 7) mod p`, and re-hash on failure. We use the
+/// natural parity returned by `sqrt` (NOT BIP340 even-y normalization).
 pub fn from_text(text: &str) -> GroupElement {
     from_bytes(text.as_bytes())
 }
 
-/// Deterministically creates a group element from the given bytes
-/// Uses SHA256 hash-to-curve construction with rejection sampling
+/// Deterministically creates a group element from the given bytes by hashing
+/// to a curve point. See [`from_text`] for the construction.
 pub(crate) fn from_bytes(buffer: &[u8]) -> GroupElement {
-    let mut hasher = Sha256::new();
-    hasher.update(buffer);
-    let mut hash = hasher.finalize();
+    let mut hash: [u8; 32] = {
+        let mut h = Sha256::new();
+        h.update(buffer);
+        let out = h.finalize();
+        let mut a = [0u8; 32];
+        a.copy_from_slice(&out);
+        a
+    };
 
     loop {
-        // Try to create a valid public key from the hash
-        // Use the hash as an x-coordinate and try both y parities
-        if let Ok(ge) = try_create_point_from_hash(&hash) {
-            return ge;
+        if let Some(point) = try_lift_x(&hash) {
+            return point;
         }
-
-        // If failed, re-hash
-        hasher = Sha256::new();
-        hasher.update(&hash);
-        hash = hasher.finalize();
+        let mut h = Sha256::new();
+        h.update(hash);
+        let out = h.finalize();
+        hash.copy_from_slice(&out);
     }
 }
 
-fn try_create_point_from_hash(hash: &[u8]) -> Result<GroupElement, ()> {
-    // Try to create compressed public key with even parity
-    let mut compressed_even = [0u8; 33];
-    compressed_even[0] = 0x02; // Even parity
-    compressed_even[1..].copy_from_slice(&hash[..32]);
-
-    if let Ok(ge) = GroupElement::from_bytes(&compressed_even) {
-        return Ok(ge);
+/// Attempt to interpret `bytes` as an x coordinate and lift to a curve point.
+///
+/// Returns `None` if `bytes` is >= field modulus or `x^3 + 7` is a
+/// non-residue.
+fn try_lift_x(bytes: &[u8; 32]) -> Option<GroupElement> {
+    let fb = FieldBytes::clone_from_slice(bytes);
+    // x must be a valid field element (< p). FieldElement::from_repr enforces this.
+    let x_opt = k256::FieldElement::from_repr(fb);
+    if !bool::from(x_opt.is_some()) {
+        return None;
     }
-
-    // Try odd parity
-    let mut compressed_odd = [0u8; 33];
-    compressed_odd[0] = 0x03; // Odd parity
-    compressed_odd[1..].copy_from_slice(&hash[..32]);
-
-    if let Ok(ge) = GroupElement::from_bytes(&compressed_odd) {
-        return Ok(ge);
+    let x = x_opt.unwrap();
+    // y^2 = x^3 + 7 (b = 7 for secp256k1)
+    let b = k256::FieldElement::from(7u64);
+    let rhs = x.square() * x + b;
+    let y_opt = rhs.sqrt();
+    if !bool::from(y_opt.is_some()) {
+        return None;
     }
-
-    Err(())
+    let y = y_opt.unwrap().normalize();
+    let x = x.normalize();
+    // Encode as SEC1 compressed and parse via GroupElement::from_bytes to keep
+    // representation invariants consistent with the rest of the crate.
+    let mut compressed = [0u8; 33];
+    compressed[0] = if bool::from(y.is_odd()) { 0x03 } else { 0x02 };
+    compressed[1..].copy_from_slice(&x.to_bytes());
+    GroupElement::from_bytes(&compressed).ok()
 }
 
 #[cfg(test)]

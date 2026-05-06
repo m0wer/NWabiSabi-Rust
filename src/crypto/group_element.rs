@@ -1,155 +1,137 @@
+//! secp256k1 group elements (curve points), backed by `k256::ProjectivePoint`.
+//!
+//! The canonical representation on the wire is a 33-byte compressed encoding
+//! (matching SEC1 / WalletWasabi). Internally we keep a projective point for
+//! fast arithmetic and lazily produce the compressed form when serializing.
+
 use crate::crypto::scalar::Scalar;
 use crate::error::{Result, WabiSabiError};
+use elliptic_curve::group::{Group, GroupEncoding};
+use elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
+use k256::{AffinePoint, EncodedPoint, ProjectivePoint};
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
 use std::ops::{Add, Mul, Sub};
+use subtle::ConstantTimeEq;
 
-/// Wrapper around secp256k1 group element (elliptic curve point) with lazy affine evaluation
-#[derive(Clone, Debug)]
+/// secp256k1 curve point. Wraps `k256::ProjectivePoint`.
+#[derive(Clone, Copy, Debug)]
 pub struct GroupElement {
-    /// Compressed public key representation (33 bytes)
-    /// This is eagerly computed and serves as the canonical representation
-    compressed: [u8; 33],
-
-    /// Lazily computed secp256k1 PublicKey for operations
-    /// OnceLock provides thread-safe lazy initialization
-    public_key: OnceLock<secp256k1::PublicKey>,
+    point: ProjectivePoint,
 }
 
 impl GroupElement {
-    /// Create a group element from a secp256k1 public key
-    pub fn from_public_key(pk: secp256k1::PublicKey) -> Self {
-        let compressed = pk.serialize();
-        let public_key = OnceLock::new();
-        let _ = public_key.set(pk); // Eagerly set since we already have it
+    /// Build from a `k256::ProjectivePoint`.
+    pub(crate) fn from_projective(point: ProjectivePoint) -> Self {
+        Self { point }
+    }
+
+    /// Borrow the underlying `ProjectivePoint`.
+    pub(crate) fn projective(&self) -> &ProjectivePoint {
+        &self.point
+    }
+
+    /// The point at infinity (additive identity).
+    pub fn infinity() -> Self {
         Self {
-            compressed,
-            public_key,
+            point: ProjectivePoint::IDENTITY,
         }
     }
 
-    /// Create group element from compressed bytes (33 bytes)
+    /// True iff this is the point at infinity.
+    pub fn is_infinity(&self) -> bool {
+        bool::from(self.point.is_identity())
+    }
+
+    /// Parse a 33-byte SEC1-compressed point. Returns `Err` for invalid
+    /// encodings. Accepts the all-zero buffer as the point at infinity to
+    /// match the legacy serialization used by C# WalletWasabi.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() != 33 {
             return Err(WabiSabiError::InvalidGroupElement);
         }
+        if bytes.iter().all(|b| *b == 0) {
+            return Ok(Self::infinity());
+        }
+        let encoded =
+            EncodedPoint::from_bytes(bytes).map_err(|_| WabiSabiError::InvalidGroupElement)?;
+        let aff = AffinePoint::from_encoded_point(&encoded);
+        if bool::from(aff.is_some()) {
+            Ok(Self {
+                point: ProjectivePoint::from(aff.unwrap()),
+            })
+        } else {
+            Err(WabiSabiError::InvalidGroupElement)
+        }
+    }
 
-        let mut compressed = [0u8; 33];
-        compressed.copy_from_slice(bytes);
+    /// Serialize to 33-byte SEC1-compressed form. Infinity serializes as
+    /// 33 zero bytes.
+    pub fn to_bytes(&self) -> [u8; 33] {
+        if self.is_infinity() {
+            return [0u8; 33];
+        }
+        let aff = self.point.to_affine();
+        let encoded = aff.to_encoded_point(true);
+        let mut out = [0u8; 33];
+        out.copy_from_slice(encoded.as_bytes());
+        out
+    }
 
-        // Validate by attempting to parse
-        secp256k1::PublicKey::from_slice(&compressed)
-            .map_err(|_| WabiSabiError::InvalidGroupElement)?;
-
+    /// Negate the point. Infinity negates to itself.
+    pub fn negate(&self) -> Result<Self> {
         Ok(Self {
-            compressed,
-            public_key: OnceLock::new(),
+            point: -self.point,
         })
     }
 
-    /// Serialize to compressed format (33 bytes)
-    pub fn to_bytes(&self) -> [u8; 33] {
-        self.compressed
-    }
-
-    /// Get the point at infinity
-    pub fn infinity() -> Self {
-        // Point at infinity is represented as all zeros
-        Self {
-            compressed: [0u8; 33],
-            public_key: OnceLock::new(),
-        }
-    }
-
-    /// Check if this is the point at infinity
-    pub fn is_infinity(&self) -> bool {
-        self.compressed[0] == 0
-    }
-
-    /// Get the underlying public key, computing it if needed
-    fn public_key(&self) -> Result<&secp256k1::PublicKey> {
-        if self.is_infinity() {
-            return Err(WabiSabiError::InvalidGroupElement);
-        }
-
-        self.public_key.get_or_init(|| {
-            secp256k1::PublicKey::from_slice(&self.compressed)
-                .expect("Invalid compressed public key")
-        });
-        Ok(self.public_key.get().expect("public_key was just initialized"))
-    }
-
-    /// Negate the group element
-    pub fn negate(&self) -> Result<Self> {
-        if self.is_infinity() {
-            return Ok(Self::infinity());
-        }
-
-        let pk = self.public_key()?;
-        let negated = pk.negate(&secp256k1::Secp256k1::new());
-        Ok(Self::from_public_key(negated))
-    }
-
-    /// Multiply by scalar (scalar * point)
+    /// Multiply by a scalar. Multiplication by zero yields infinity.
     pub fn multiply(&self, scalar: &Scalar) -> Result<Self> {
-        if self.is_infinity() {
-            return Ok(Self::infinity());
-        }
-
-        let pk = self.public_key()?;
-        let result = pk.mul_tweak(&secp256k1::Secp256k1::new(), scalar.inner())
-            .map_err(|_| WabiSabiError::InvalidGroupElement)?;
-        Ok(Self::from_public_key(result))
+        Ok(Self {
+            point: self.point * scalar.inner(),
+        })
     }
 }
 
+// -- Arithmetic operators --------------------------------------------------
+
 impl Add for GroupElement {
     type Output = Result<Self>;
-
     fn add(self, other: Self) -> Self::Output {
-        if self.is_infinity() {
-            return Ok(other);
-        }
-        if other.is_infinity() {
-            return Ok(self);
-        }
-
-        let pk1 = self.public_key()?;
-        let pk2 = other.public_key()?;
-
-        let result = pk1.combine(pk2)
-            .map_err(|_| WabiSabiError::InvalidGroupElement)?;
-        Ok(Self::from_public_key(result))
+        Ok(Self {
+            point: self.point + other.point,
+        })
     }
 }
 
 impl Add for &GroupElement {
     type Output = Result<GroupElement>;
-
     fn add(self, other: Self) -> Self::Output {
-        self.clone() + other.clone()
+        Ok(GroupElement {
+            point: self.point + other.point,
+        })
     }
 }
 
 impl Sub for GroupElement {
     type Output = Result<Self>;
-
     fn sub(self, other: Self) -> Self::Output {
-        self + other.negate()?
+        Ok(Self {
+            point: self.point - other.point,
+        })
     }
 }
 
 impl Sub for &GroupElement {
     type Output = Result<GroupElement>;
-
     fn sub(self, other: Self) -> Self::Output {
-        self.clone() - other.clone()
+        Ok(GroupElement {
+            point: self.point - other.point,
+        })
     }
 }
 
 impl Mul<&GroupElement> for &Scalar {
     type Output = Result<GroupElement>;
-
     fn mul(self, ge: &GroupElement) -> Self::Output {
         ge.multiply(self)
     }
@@ -157,7 +139,6 @@ impl Mul<&GroupElement> for &Scalar {
 
 impl Mul<&Scalar> for &GroupElement {
     type Output = Result<GroupElement>;
-
     fn mul(self, scalar: &Scalar) -> Self::Output {
         self.multiply(scalar)
     }
@@ -165,7 +146,6 @@ impl Mul<&Scalar> for &GroupElement {
 
 impl Mul<&GroupElement> for Scalar {
     type Output = Result<GroupElement>;
-
     fn mul(self, ge: &GroupElement) -> Self::Output {
         ge.multiply(&self)
     }
@@ -173,7 +153,6 @@ impl Mul<&GroupElement> for Scalar {
 
 impl Mul<GroupElement> for Scalar {
     type Output = Result<GroupElement>;
-
     fn mul(self, ge: GroupElement) -> Self::Output {
         ge.multiply(&self)
     }
@@ -181,7 +160,6 @@ impl Mul<GroupElement> for Scalar {
 
 impl Mul<GroupElement> for &Scalar {
     type Output = Result<GroupElement>;
-
     fn mul(self, ge: GroupElement) -> Self::Output {
         ge.multiply(self)
     }
@@ -189,7 +167,6 @@ impl Mul<GroupElement> for &Scalar {
 
 impl Mul<Scalar> for &GroupElement {
     type Output = Result<GroupElement>;
-
     fn mul(self, scalar: Scalar) -> Self::Output {
         self.multiply(&scalar)
     }
@@ -197,16 +174,16 @@ impl Mul<Scalar> for &GroupElement {
 
 impl Mul<Scalar> for GroupElement {
     type Output = Result<GroupElement>;
-
     fn mul(self, scalar: Scalar) -> Self::Output {
         self.multiply(&scalar)
     }
 }
 
+// -- Equality / hash / serde ----------------------------------------------
+
 impl PartialEq for GroupElement {
     fn eq(&self, other: &Self) -> bool {
-        // Fast path: compare compressed representations
-        self.compressed == other.compressed
+        bool::from(self.point.to_bytes().ct_eq(&other.point.to_bytes()))
     }
 }
 
@@ -214,18 +191,16 @@ impl Eq for GroupElement {}
 
 impl std::hash::Hash for GroupElement {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.compressed.hash(state);
+        self.to_bytes().hash(state);
     }
 }
 
 impl Serialize for GroupElement {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeTuple;
+        let bytes = self.to_bytes();
         let mut seq = serializer.serialize_tuple(33)?;
-        for byte in &self.compressed {
+        for byte in &bytes {
             seq.serialize_element(byte)?;
         }
         seq.end()
@@ -233,10 +208,9 @@ impl Serialize for GroupElement {
 }
 
 impl<'de> Deserialize<'de> for GroupElement {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         use serde::de::Error;
         let bytes: Vec<u8> = Deserialize::deserialize(deserializer)?;
         Self::from_bytes(&bytes).map_err(D::Error::custom)
@@ -248,46 +222,51 @@ mod tests {
     use super::*;
     use rand::thread_rng;
 
+    fn random_point() -> GroupElement {
+        let mut rng = thread_rng();
+        let s = Scalar::random(&mut rng);
+        let g = GroupElement::from_projective(ProjectivePoint::GENERATOR);
+        (g * s).unwrap()
+    }
+
     #[test]
-    fn test_infinity() {
+    fn infinity_is_identity() {
         let inf = GroupElement::infinity();
         assert!(inf.is_infinity());
+        let p = random_point();
+        assert_eq!((inf.clone() + p.clone()).unwrap(), p);
     }
 
     #[test]
-    fn test_serialization() {
-        let mut rng = thread_rng();
-        let scalar = Scalar::random(&mut rng);
-        let secp = secp256k1::Secp256k1::new();
-        let (_, pk) = secp.generate_keypair(&mut rng);
-        let ge = GroupElement::from_public_key(pk);
-
-        let bytes = ge.to_bytes();
-        let deserialized = GroupElement::from_bytes(&bytes).unwrap();
-        assert_eq!(ge, deserialized);
+    fn round_trip_compressed() {
+        let p = random_point();
+        let bytes = p.to_bytes();
+        let q = GroupElement::from_bytes(&bytes).unwrap();
+        assert_eq!(p, q);
     }
 
     #[test]
-    fn test_addition_identity() {
-        let secp = secp256k1::Secp256k1::new();
-        let mut rng = thread_rng();
-        let (_, pk) = secp.generate_keypair(&mut rng);
-        let ge = GroupElement::from_public_key(pk);
+    fn infinity_round_trip() {
         let inf = GroupElement::infinity();
-
-        let result = (ge.clone() + inf).unwrap();
-        assert_eq!(result, ge);
+        let bytes = inf.to_bytes();
+        assert_eq!(bytes, [0u8; 33]);
+        let parsed = GroupElement::from_bytes(&bytes).unwrap();
+        assert!(parsed.is_infinity());
     }
 
     #[test]
-    fn test_scalar_multiplication() {
-        let secp = secp256k1::Secp256k1::new();
-        let mut rng = thread_rng();
-        let (_, pk) = secp.generate_keypair(&mut rng);
-        let ge = GroupElement::from_public_key(pk);
-        let scalar = Scalar::one();
+    fn zero_scalar_yields_infinity() {
+        let p = random_point();
+        let zero = Scalar::zero();
+        let r = (zero * p).unwrap();
+        assert!(r.is_infinity());
+    }
 
-        let result = (&scalar * &ge).unwrap();
-        assert_eq!(result, ge);
+    #[test]
+    fn negation() {
+        let p = random_point();
+        let neg = p.negate().unwrap();
+        let zero = (p + neg).unwrap();
+        assert!(zero.is_infinity());
     }
 }

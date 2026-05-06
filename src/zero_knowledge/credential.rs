@@ -90,15 +90,7 @@ impl Credential {
         if self.value < 0 {
             return Err(WabiSabiError::Unspecified);
         }
-
-        // Convert i64 to u64 (safe because we checked it's non-negative)
-        let value_u64 = self.value as u64;
-
-        // Convert to 32-byte array (little-endian)
-        let mut bytes = [0u8; 32];
-        bytes[..8].copy_from_slice(&value_u64.to_le_bytes());
-
-        Scalar::from_bytes(&bytes)
+        Ok(Scalar::from_u64(self.value as u64))
     }
 
     /// Compute Pedersen commitment: value*Gg + randomness*Gh

@@ -89,7 +89,6 @@ impl Mul<&GroupElementVector> for &ScalarVector {
             return Err(crate::error::WabiSabiError::Unspecified);
         }
 
-        let secp = secp256k1::Secp256k1::new();
         let mut result = GroupElement::infinity();
 
         for (scalar, ge) in self.iter().zip(ge_vec.iter()) {

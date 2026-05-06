@@ -198,7 +198,7 @@ impl CredentialIssuer {
         }
 
         // Add delta term
-        let delta_scalar = Scalar::from_i64(delta)?;
+        let delta_scalar = Scalar::from_i64(delta);
         let delta_point = Generators::gg().multiply(&delta_scalar)?;
         public_point = (public_point + delta_point)?;
 
@@ -224,7 +224,7 @@ impl CredentialIssuer {
 
         // Ma = sum(2^i * Ci), so we need Ma - sum(2^i * Ci) = 0
         for (i, commitment) in bit_commitments.iter().enumerate() {
-            let power_of_two = Scalar::from_u64(1u64 << i)?;
+            let power_of_two = Scalar::from_u64(1u64 << i);
             let scaled_commitment = (&power_of_two * commitment)?;
             let neg = scaled_commitment.negate()?;
             public_point = (public_point + neg)?;

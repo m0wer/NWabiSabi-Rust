@@ -372,7 +372,7 @@ impl WabiSabiClient {
         }
 
         // Add delta*Gg to balance equation
-        let delta_scalar = Scalar::from_i64(delta)?;
+        let delta_scalar = Scalar::from_i64(delta);
         let delta_point = Generators::gg().multiply(&delta_scalar)?;
         public_point = (public_point + delta_point)?;
 
