@@ -191,10 +191,14 @@ mod tests {
     #[test]
     fn test_negative_value_rejected() {
         let mut rng = SecureRandom::new();
+        let sk = CredentialIssuerSecretKey::new(&mut rng);
         let randomness = rng.get_scalar();
+        let value_scalar = Scalar::from_u64(1_000);
+        let ma = ((value_scalar * Generators::gg()).unwrap()
+            + (randomness * Generators::gh()).unwrap())
+        .unwrap();
         let t = rng.get_scalar();
-        let v = GroupElement::infinity();
-        let mac = Mac::new(t, v).unwrap();
+        let mac = Mac::compute_mac(&sk, &ma, &t).unwrap();
 
         let result = Credential::new(-1000, randomness, mac);
         assert!(result.is_err());

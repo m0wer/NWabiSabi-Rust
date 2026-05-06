@@ -122,12 +122,7 @@ mod tests {
         let value = 10_000i64;
         let randomness = rng.get_scalar();
 
-        let value_scalar = Scalar::from_bytes(&{
-            let mut bytes = [0u8; 32];
-            bytes[..8].copy_from_slice(&(value as u64).to_le_bytes());
-            bytes
-        })
-        .unwrap();
+        let value_scalar = Scalar::from_u64(value as u64);
 
         let ma = ((value_scalar * Generators::gg()).unwrap()
             + (randomness * Generators::gh()).unwrap())
@@ -160,12 +155,7 @@ mod tests {
         let value = 25_000i64;
         let randomness = rng.get_scalar();
 
-        let value_scalar = Scalar::from_bytes(&{
-            let mut bytes = [0u8; 32];
-            bytes[..8].copy_from_slice(&(value as u64).to_le_bytes());
-            bytes
-        })
-        .unwrap();
+        let value_scalar = Scalar::from_u64(value as u64);
 
         let ma = ((value_scalar * Generators::gg()).unwrap()
             + (randomness * Generators::gh()).unwrap())

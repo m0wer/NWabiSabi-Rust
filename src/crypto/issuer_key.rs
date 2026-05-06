@@ -25,14 +25,25 @@ impl CredentialIssuerSecretKey {
     }
 
     /// Compute the public parameters from this secret key
+    ///
+    /// Cw = w*Gw + wp*Gwp
+    /// I  = Gv - x0*Gx0 - x1*Gx1 - ya*Ga
+    ///
+    /// I is constructed so that the issuer-side check
+    ///   Z = CV - (w*Gw + x0*Cx0 + x1*Cx1 + ya*Ca)
+    /// reduces to z*I when the credential was honestly randomized with z.
     pub fn compute_parameters(&self) -> crate::error::Result<CredentialIssuerParameters> {
         use crate::crypto::Generators;
 
         // Cw = w*Gw + wp*Gwp
         let cw = ((&self.w * Generators::gw())? + (&self.wp * Generators::gwp())?)?;
 
-        // I = ya*Ga
-        let i = (&self.ya * Generators::ga())?;
+        // I = Gv - x0*Gx0 - x1*Gx1 - ya*Ga
+        let x0_gx0 = (&self.x0 * Generators::gx0())?;
+        let x1_gx1 = (&self.x1 * Generators::gx1())?;
+        let ya_ga = (&self.ya * Generators::ga())?;
+        let neg_sum = ((x0_gx0 + x1_gx1)? + ya_ga)?.negate()?;
+        let i = (Generators::gv().clone() + neg_sum)?;
 
         Ok(CredentialIssuerParameters { cw, i })
     }
