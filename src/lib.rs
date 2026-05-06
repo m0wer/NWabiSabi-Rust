@@ -11,6 +11,9 @@ pub mod ffi;
 pub mod wabisabi_client;
 pub mod zero_knowledge;
 
+#[cfg(feature = "python")]
+pub mod python;
+
 // Re-export commonly used types
 pub use credential_issuer::CredentialIssuer;
 pub use error::{Result, WabiSabiError};

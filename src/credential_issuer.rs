@@ -264,8 +264,13 @@ impl CredentialIssuer {
         Ok((macs, knowledge))
     }
 
-    /// Reset state for tests.
-    #[cfg(test)]
+    /// Reset state for tests and cross-round reuse.
+    ///
+    /// Compiled in for tests and for the `python` feature: the Python
+    /// binding needs an explicit way to recycle the issuer between
+    /// CoinJoin rounds without rebuilding the whole secret-key + DH
+    /// curve setup.
+    #[cfg(any(test, feature = "python"))]
     pub fn reset(&self, new_balance: i64) {
         self.balance.store(new_balance, Ordering::SeqCst);
         let mut seen = self.serial_numbers.lock().unwrap();

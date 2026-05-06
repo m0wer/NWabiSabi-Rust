@@ -1,0 +1,37 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "nwabisabi"
+version = "0.1.0"
+description = "Python bindings for the WabiSabi anonymous credential protocol"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "JoinMarket-NG Contributors" }]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security :: Cryptography",
+    "License :: OSI Approved :: MIT License",
+]
+
+[project.urls]
+Source = "https://github.com/m0wer/nwabisabi"
+
+[tool.maturin]
+# Build the cdylib via the gated `python` cargo feature so default Rust
+# builds (and `cargo test`) stay slim and PyO3-free.
+features = ["python"]
+# Module name produced by `#[pymodule] fn nwabisabi`.
+module-name = "nwabisabi"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
