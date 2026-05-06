@@ -111,6 +111,14 @@ impl Generators {
     pub fn negated_gh_powers_of_two() -> &'static [GroupElement] {
         &NEGATED_GH_POWERS_OF_TWO
     }
+
+    /// Deterministically derive a group element from arbitrary text.
+    ///
+    /// Mirrors WalletWasabi `Generators.FromText`. Used by tests and by any
+    /// caller that needs a labelled NUMS-style point.
+    pub fn from_text(text: &str) -> GroupElement {
+        from_text(text)
+    }
 }
 
 /// Deterministically creates a group element from the given text.

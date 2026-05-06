@@ -25,7 +25,7 @@ pub trait CredentialsRequest {
 ///
 /// Used to obtain initial credentials with zero value that can later be
 /// exchanged for real-value credentials.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZeroCredentialsRequest {
     /// Issuance requests for zero-value credentials
     requested: Vec<IssuanceRequest>,
@@ -64,7 +64,7 @@ impl CredentialsRequest for ZeroCredentialsRequest {
 /// - Input registration: Present zero-value credentials, request value credentials (positive delta)
 /// - Output registration: Present value credentials, request zero-value credentials (negative delta)
 /// - Reissuance: Present and request credentials with same total value (zero delta)
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RealCredentialsRequest {
     /// Delta between requested and presented credential values
     delta: i64,

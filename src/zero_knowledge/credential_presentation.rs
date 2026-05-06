@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// A randomized credential is a tuple of five group elements: (Ca, Cx0, Cx1, CV, S)
 /// These components hide the original credential while still allowing the coordinator
 /// to verify it was validly issued.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialPresentation {
     /// Randomized amount commitment component: Ca = Ma + z*Ga
     ca: GroupElement,
