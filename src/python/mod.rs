@@ -73,9 +73,22 @@ fn decode<'a, T: serde::Deserialize<'a>>(bytes: &'a [u8]) -> PyResult<T> {
 /// Wraps `nwabisabi::CredentialIssuer`. The handle owns the issuer
 /// secret key and an internal balance; `handle_request` mutates that
 /// balance atomically.
+///
+/// Held inside an `Option` so the `configure` builder can move the
+/// issuer through `with_max_amount` / `with_range_proof_width`
+/// (which take `self` by value) without requiring the inner type to
+/// be `Default`.
 #[pyclass(name = "CredentialIssuer", module = "nwabisabi")]
 pub struct PyIssuer {
-    inner: RsIssuer,
+    inner: Option<RsIssuer>,
+}
+
+impl PyIssuer {
+    fn issuer(&self) -> &RsIssuer {
+        self.inner
+            .as_ref()
+            .expect("issuer slot temporarily empty during configure(); not exposed")
+    }
 }
 
 #[pymethods]
@@ -86,24 +99,42 @@ impl PyIssuer {
     fn new(secret_key_bytes: &[u8], initial_balance: i64) -> PyResult<Self> {
         let sk: CredentialIssuerSecretKey = decode(secret_key_bytes)?;
         let inner = RsIssuer::new(sk, initial_balance).map_err(wabisabi_err)?;
-        Ok(Self { inner })
+        Ok(Self { inner: Some(inner) })
+    }
+
+    /// Override the per-credential maximum value and corresponding
+    /// range-proof width. Issuer and client *must* agree on these
+    /// numbers or the issuer rejects every real-amount request with
+    /// "Invalid bit commitment". Exposed because the in-crate Rust
+    /// defaults (Wasabi-tuned `MAX_AMOUNT = 2**27`) are smaller than
+    /// downstream protocols (e.g. JMP-0005 uses `2**51`) need.
+    fn configure(&mut self, max_amount: i64, range_proof_width: usize) {
+        let issuer = self
+            .inner
+            .take()
+            .expect("issuer slot temporarily empty; configure() called re-entrantly");
+        self.inner = Some(
+            issuer
+                .with_max_amount(max_amount)
+                .with_range_proof_width(range_proof_width),
+        );
     }
 
     /// Return the public issuer parameters (`CredentialIssuerParameters`)
     /// as bincode bytes for the client to consume.
     fn parameters<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        let bytes = encode(self.inner.parameters())?;
+        let bytes = encode(self.issuer().parameters())?;
         Ok(PyBytes::new_bound(py, &bytes))
     }
 
     /// Current issuer balance.
     fn balance(&self) -> i64 {
-        self.inner.balance()
+        self.issuer().balance()
     }
 
     /// Reset the issuer balance. Used between rounds.
     fn reset(&self, new_balance: i64) {
-        self.inner.reset(new_balance);
+        self.issuer().reset(new_balance);
     }
 
     /// Process either a zero-amount or real-amount credentials request.
@@ -119,10 +150,10 @@ impl PyIssuer {
         let mut rng = SecureRandom::new();
         let response = if is_real {
             let req: RealCredentialsRequest = decode(request_bytes)?;
-            self.inner.handle_request(&req, &mut rng).map_err(wabisabi_err)?
+            self.issuer().handle_request(&req, &mut rng).map_err(wabisabi_err)?
         } else {
             let req: ZeroCredentialsRequest = decode(request_bytes)?;
-            self.inner.handle_request(&req, &mut rng).map_err(wabisabi_err)?
+            self.issuer().handle_request(&req, &mut rng).map_err(wabisabi_err)?
         };
         Ok(PyBytes::new_bound(py, &encode(&response)?))
     }
