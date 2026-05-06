@@ -132,6 +132,68 @@ fn test_challenge_generation_non_zero() {
     }
 }
 
+/// Port of `TranscriptTests.SyntheticNoncesSecretDependenceTest`
+/// (WalletWasabi.Tests/UnitTests/Crypto/TranscriptTests.cs).
+///
+/// With a deterministic zero-RNG, two transcripts that share the same public
+/// commitment AND the same witness must produce identical synthetic nonces
+/// (because the only entropy left comes from the transcript state). All other
+/// pairs (differing commitment OR witness) must still diverge: this is what
+/// guarantees the protocol stays safe even if the host RNG is broken.
+#[test]
+fn test_synthetic_nonces_secret_dependence() {
+    use rand::rngs::mock::StepRng;
+
+    let protocol = b"test TranscriptRng collisions";
+
+    let commitment1 = vec![Generators::gx0().clone()];
+    let commitment2 = vec![Generators::gx1().clone()];
+    let witness1 = vec![Scalar::one()];
+    let witness2 = vec![Scalar::zero()];
+
+    let mut transcript1 = Transcript::new(protocol);
+    let mut transcript2 = Transcript::new(protocol);
+    let mut transcript3 = Transcript::new(protocol);
+    let mut transcript4 = Transcript::new(protocol);
+
+    transcript1.commit_public_nonces(&commitment1);
+    transcript2.commit_public_nonces(&commitment2);
+    transcript3.commit_public_nonces(&commitment2);
+    transcript4.commit_public_nonces(&commitment2);
+
+    // Deterministic zero-byte RNG: same RNG output across all four providers
+    // forces nonce divergence to come purely from the transcript-derived state.
+    let mut rng1 = StepRng::new(0, 0);
+    let mut rng2 = StepRng::new(0, 0);
+    let mut rng3 = StepRng::new(0, 0);
+    let mut rng4 = StepRng::new(0, 0);
+
+    let mut provider1 =
+        transcript1.create_synthetic_secret_nonce_provider(&witness1, &mut rng1);
+    let mut provider2 =
+        transcript2.create_synthetic_secret_nonce_provider(&witness1, &mut rng2);
+    let mut provider3 =
+        transcript3.create_synthetic_secret_nonce_provider(&witness2, &mut rng3);
+    let mut provider4 =
+        transcript4.create_synthetic_secret_nonce_provider(&witness2, &mut rng4);
+
+    let nonce1 = provider1.get_scalar().unwrap();
+    let nonce2 = provider2.get_scalar().unwrap();
+    let nonce3 = provider3.get_scalar().unwrap();
+    let nonce4 = provider4.get_scalar().unwrap();
+
+    // Diverge: same witness, different commitments
+    assert_ne!(nonce1, nonce2);
+    // Diverge: different witness AND different commitment
+    assert_ne!(nonce1, nonce3);
+    assert_ne!(nonce1, nonce4);
+    // Diverge: same commitment, different witness
+    assert_ne!(nonce2, nonce3);
+    assert_ne!(nonce2, nonce4);
+    // Same commitment, same witness, deterministic RNG: must be identical.
+    assert_eq!(nonce3, nonce4);
+}
+
 #[test]
 fn test_sequential_challenges_different() {
     let mut transcript = Transcript::new(b"test");
