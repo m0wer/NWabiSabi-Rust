@@ -111,8 +111,8 @@ mod tests {
         let transcript2 = Transcript::new(b"test");
 
         // Using same random seed should produce same nonces
-        let mut provider1 = transcript1.create_synthetic_secret_nonce_provider(&secrets, &mut rng1);
-        let mut provider2 = transcript2.create_synthetic_secret_nonce_provider(&secrets, &mut rng2);
+        let _provider1 = transcript1.create_synthetic_secret_nonce_provider(&secrets, &mut rng1);
+        let _provider2 = transcript2.create_synthetic_secret_nonce_provider(&secrets, &mut rng2);
 
         // Note: This test may not pass because SecureRandom is not deterministic
         // In production, determinism comes from the transcript state, not the RNG

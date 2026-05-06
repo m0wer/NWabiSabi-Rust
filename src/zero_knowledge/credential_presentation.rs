@@ -1,7 +1,6 @@
 use crate::crypto::issuer_key::CredentialIssuerSecretKey;
 use crate::crypto::{Generators, GroupElement};
 use crate::error::Result;
-use crate::zero_knowledge::{Statement, Transcript};
 use serde::{Deserialize, Serialize};
 
 /// Represents a randomized credential that can be presented to the coordinator
@@ -78,18 +77,6 @@ impl CredentialPresentation {
 
         // Z = CV - sum
         &self.cv - &sum
-    }
-
-    /// Create a knowledge statement for this credential presentation
-    /// This is used for zero-knowledge proof generation/verification
-    pub fn create_knowledge_statement(
-        &self,
-        transcript: Option<&mut Transcript>,
-    ) -> Result<Statement> {
-        // For now, return a placeholder error
-        // A full implementation would construct the appropriate Statement
-        // for proving knowledge of the credential
-        Err(crate::error::WabiSabiError::Unspecified)
     }
 }
 

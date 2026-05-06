@@ -99,24 +99,6 @@ impl Credential {
         let randomness_term = (randomness * Generators::gh())?;
         value_term + randomness_term
     }
-
-    /// Create the witness for a credential presentation proof
-    ///
-    /// The witness includes the secret values known to the credential holder
-    pub fn create_presentation_witness(&self, z: &Scalar) -> Result<crate::crypto::ScalarVector> {
-        // The witness for credential presentation includes:
-        // - value
-        // - randomness (r_a)
-        // - z (randomization factor)
-        // - t (MAC component)
-        let value_scalar = self.value_as_scalar()?;
-        Ok(crate::crypto::ScalarVector::new(vec![
-            value_scalar,
-            self.randomness.clone(),
-            z.clone(),
-            self.mac.t.clone(),
-        ]))
-    }
 }
 
 #[cfg(test)]
