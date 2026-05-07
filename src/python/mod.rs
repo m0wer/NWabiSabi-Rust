@@ -319,6 +319,111 @@ fn derive_issuer_parameters<'py>(
     Ok(PyBytes::new_bound(py, &encode(&params)?))
 }
 
+// ---------------------------------------------------------------------------
+// CLSAG-style ring signatures (linkable, secp256k1)
+// ---------------------------------------------------------------------------
+//
+// Wire shape stays byte-oriented to match the IRC-level transport that
+// consumes these. Ring members travel as 32-byte x-only pubkeys
+// (BIP340 form) so the caller can pass slices straight from a
+// pubkey-list field. The signature itself is the canonical
+// `33 + 32 + 32*N` blob produced by `RingSignature::to_bytes`.
+
+use crate::crypto::clsag::{self, RingSignature};
+use crate::crypto::generators::Generators;
+use crate::crypto::Scalar;
+
+/// Coerce a Python `list[bytes]` of x-only ring members into the
+/// `[[u8; 32]]` form `clsag::sign`/`verify` expect.
+fn ring_from_py(ring: &[Vec<u8>]) -> PyResult<Vec<[u8; 32]>> {
+    ring.iter()
+        .enumerate()
+        .map(|(i, p)| {
+            <[u8; 32]>::try_from(p.as_slice()).map_err(|_| {
+                PyValueError::new_err(format!(
+                    "ring[{i}]: expected 32-byte x-only pubkey, got {} bytes",
+                    p.len()
+                ))
+            })
+        })
+        .collect()
+}
+
+fn scalar_from_secret(bytes: &[u8]) -> PyResult<Scalar> {
+    let arr = <[u8; 32]>::try_from(bytes)
+        .map_err(|_| PyValueError::new_err("secret_key: expected 32 bytes"))?;
+    Ok(Scalar::from_bytes_reduced(&arr))
+}
+
+/// Sign `message` over `ring_xonly` at `signer_idx` with `secret_key`.
+///
+/// `secret_key` is a 32-byte big-endian scalar. `ring_xonly` is a list
+/// of 32-byte BIP340 x-only pubkeys; `ring_xonly[signer_idx]` MUST
+/// match `secret_key * G` lifted to even-Y, otherwise this raises
+/// `RuntimeError`. Returns the signature blob (`33 + 32 + 32*N` bytes).
+#[pyfunction]
+fn clsag_sign<'py>(
+    py: Python<'py>,
+    secret_key: &[u8],
+    ring_xonly: Vec<Vec<u8>>,
+    signer_idx: usize,
+    run_id: &[u8],
+    message: &[u8],
+) -> PyResult<Bound<'py, PyBytes>> {
+    let ring = ring_from_py(&ring_xonly)?;
+    let sk = scalar_from_secret(secret_key)?;
+    let mut rng = SecureRandom::new();
+    let sig = clsag::sign(&ring, signer_idx, &sk, run_id, message, &mut rng)
+        .map_err(wabisabi_err)?;
+    Ok(PyBytes::new_bound(py, &sig.to_bytes()))
+}
+
+/// Verify a CLSAG ring signature.
+///
+/// Returns `(ok, key_image_bytes)`. `key_image_bytes` is the 33-byte
+/// compressed wire-form key image extracted from `signature_bytes`,
+/// regardless of validity, so the caller can dedupe at the gossip
+/// layer without re-parsing the blob. `ok` is `True` iff the signature
+/// is valid for `(ring_xonly, run_id, message)`.
+#[pyfunction]
+fn clsag_verify<'py>(
+    py: Python<'py>,
+    signature_bytes: &[u8],
+    ring_xonly: Vec<Vec<u8>>,
+    run_id: &[u8],
+    message: &[u8],
+) -> PyResult<(bool, Bound<'py, PyBytes>)> {
+    let ring = ring_from_py(&ring_xonly)?;
+    let sig = RingSignature::from_bytes(signature_bytes, ring.len()).map_err(wabisabi_err)?;
+    let key_image = sig.key_image.to_bytes();
+    let ok = clsag::verify(&ring, &sig, run_id, message).is_ok();
+    Ok((ok, PyBytes::new_bound(py, &key_image)))
+}
+
+/// Compute the per-run key image for `secret_key` without producing a
+/// full signature. Useful for callers that need a pre-flight Sybil
+/// check (reject duplicate identity commitments before requesting the
+/// full attestation).
+#[pyfunction]
+fn clsag_key_image<'py>(
+    py: Python<'py>,
+    secret_key: &[u8],
+    run_id: &[u8],
+) -> PyResult<Bound<'py, PyBytes>> {
+    let sk = scalar_from_secret(secret_key)?;
+    // I = H_p(P) * x + H_s("rotate" || run_id) * G. We replicate the
+    // call sequence rather than exposing the helpers, keeping the
+    // module-level DSTs encapsulated.
+    let g = *Generators::g();
+    let p = g.multiply(&sk).map_err(wabisabi_err)?;
+    let h_p = clsag::hash_to_point_for_python(&p.to_bytes()).map_err(wabisabi_err)?;
+    let i_core = h_p.multiply(&sk).map_err(wabisabi_err)?;
+    let rot = clsag::run_rotation_scalar_for_python(run_id);
+    let rot_g = g.multiply(&rot).map_err(wabisabi_err)?;
+    let key_image = (i_core + rot_g).map_err(wabisabi_err)?;
+    Ok(PyBytes::new_bound(py, &key_image.to_bytes()))
+}
+
 #[pymodule]
 fn nwabisabi(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyIssuer>()?;
@@ -327,5 +432,8 @@ fn nwabisabi(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCredential>()?;
     m.add_function(wrap_pyfunction!(generate_issuer_secret_key, m)?)?;
     m.add_function(wrap_pyfunction!(derive_issuer_parameters, m)?)?;
+    m.add_function(wrap_pyfunction!(clsag_sign, m)?)?;
+    m.add_function(wrap_pyfunction!(clsag_verify, m)?)?;
+    m.add_function(wrap_pyfunction!(clsag_key_image, m)?)?;
     Ok(())
 }

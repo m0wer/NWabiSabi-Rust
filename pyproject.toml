@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "nwabisabi"
-version = "0.1.0"
+version = "0.2.0"
 description = "Python bindings for the WabiSabi anonymous credential protocol"
 readme = "README.md"
 license = { text = "MIT" }
