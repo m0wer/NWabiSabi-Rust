@@ -186,6 +186,99 @@ pub fn show_credential_statement(
     Statement::from_matrix(matrix)
 }
 
+/// Show-credential knowledge for a stand-alone presentation that publicly
+/// reveals the credential's amount.
+///
+/// Used by the JMP-0005 ZK-4 (`!zkpreg`) flow: the prover discloses the
+/// output amount in clear (it must be public anyway, since the eventual
+/// CoinJoin transaction puts that amount on chain) and proves with a
+/// 4-component witness `[z, -t*z, t, randomness]` that the rerandomized
+/// commitment `Ca` opens to that exact `amount` under a valid MAC.
+///
+/// Caller must pre-compute `Z = z * I`; this is the same I-bound point
+/// used by the issuer-side response in [`show_credential_knowledge`].
+pub fn show_credential_revealed_amount_knowledge(
+    presentation: &CredentialPresentation,
+    z: &Scalar,
+    value: i64,
+    randomness: &Scalar,
+    mac_t: &Scalar,
+    iparams: &CredentialIssuerParameters,
+) -> Result<Knowledge> {
+    if value < 0 {
+        return Err(crate::error::WabiSabiError::Unspecified);
+    }
+    let z_pub = (z * &iparams.i)?;
+    let statement =
+        show_credential_revealed_amount_statement(presentation, &z_pub, value, iparams)?;
+    let neg_tz = (mac_t * z).negate();
+    let witness = ScalarVector::new(vec![
+        z.clone(),
+        neg_tz,
+        mac_t.clone(),
+        randomness.clone(),
+    ]);
+    Knowledge::new(statement, witness)
+}
+
+/// Show-credential statement with a publicly revealed amount
+/// (4 equations, witness width 4).
+///
+/// Differs from [`show_credential_statement`] in that `value*Gg` is moved
+/// to the LHS of the third equation, so the `value` column drops out of
+/// the witness:
+///   `Z              = I*z`
+///   `Cx1            = Gx1*z + Gx0*(-tz) + Cx0*t`
+///   `Ca - value*Gg  = Ga*z + Gh*randomness`
+///   `S              = Gs*randomness`
+///
+/// Witness order: `[z, -t*z, t, randomness]`.
+pub fn show_credential_revealed_amount_statement(
+    c: &CredentialPresentation,
+    z_public: &GroupElement,
+    value: i64,
+    iparams: &CredentialIssuerParameters,
+) -> Result<Statement> {
+    if value < 0 {
+        return Err(crate::error::WabiSabiError::Unspecified);
+    }
+    let value_scalar = Scalar::from_u64(value as u64);
+    let value_term = (&value_scalar * Generators::gg())?;
+    let ca_minus_amount = sub(c.ca(), &value_term);
+
+    let matrix = vec![
+        vec![
+            Some(z_public.clone()),
+            Some(iparams.i.clone()),
+            Some(infinity()),
+            Some(infinity()),
+            Some(infinity()),
+        ],
+        vec![
+            Some(c.cx1().clone()),
+            Some(Generators::gx1().clone()),
+            Some(Generators::gx0().clone()),
+            Some(c.cx0().clone()),
+            Some(infinity()),
+        ],
+        vec![
+            Some(ca_minus_amount),
+            Some(Generators::ga().clone()),
+            Some(infinity()),
+            Some(infinity()),
+            Some(Generators::gh().clone()),
+        ],
+        vec![
+            Some(c.s().clone()),
+            Some(infinity()),
+            Some(infinity()),
+            Some(infinity()),
+            Some(Generators::gs().clone()),
+        ],
+    ];
+    Ok(Statement::from_matrix(matrix))
+}
+
 /// Balance-proof knowledge.
 ///
 /// `balanceCommitment = zSum * Ga + rDeltaSum * Gh` must commit to zero,
@@ -448,6 +541,85 @@ mod tests {
         )
         .unwrap();
         assert!(ok);
+    }
+
+    #[test]
+    fn test_show_credential_revealed_amount_roundtrip() {
+        let mut rng = fresh_rng();
+        let sk = CredentialIssuerSecretKey::new(&mut rng);
+        let value = 7_500i64;
+        let randomness = rng.get_scalar();
+        let (mac, _ma) = issue_credential(&sk, value, &randomness, &mut rng);
+
+        let credential =
+            crate::zero_knowledge::Credential::new(value, randomness.clone(), mac.clone()).unwrap();
+        let z = rng.get_scalar();
+        let presentation = credential.present(&z).unwrap();
+        let iparams = sk.compute_parameters().unwrap();
+
+        let knowledge = show_credential_revealed_amount_knowledge(
+            &presentation,
+            &z,
+            value,
+            &randomness,
+            &mac.t,
+            &iparams,
+        )
+        .unwrap();
+        knowledge
+            .assert_soundness()
+            .expect("revealed-amount witness must satisfy");
+
+        let mut tp = Transcript::new(b"reveal-amount-test");
+        let proofs =
+            ProofSystem::prove(&mut tp, std::slice::from_ref(&knowledge), &mut rng).unwrap();
+        let mut tv = Transcript::new(b"reveal-amount-test");
+        let ok = ProofSystem::verify(
+            &mut tv,
+            std::slice::from_ref(&knowledge.statement),
+            &proofs,
+        )
+        .unwrap();
+        assert!(ok);
+    }
+
+    #[test]
+    fn test_show_credential_revealed_amount_wrong_amount_rejected() {
+        let mut rng = fresh_rng();
+        let sk = CredentialIssuerSecretKey::new(&mut rng);
+        let value = 12_345i64;
+        let randomness = rng.get_scalar();
+        let (mac, _ma) = issue_credential(&sk, value, &randomness, &mut rng);
+
+        let credential =
+            crate::zero_knowledge::Credential::new(value, randomness.clone(), mac.clone()).unwrap();
+        let z = rng.get_scalar();
+        let presentation = credential.present(&z).unwrap();
+        let iparams = sk.compute_parameters().unwrap();
+
+        let knowledge = show_credential_revealed_amount_knowledge(
+            &presentation,
+            &z,
+            value,
+            &randomness,
+            &mac.t,
+            &iparams,
+        )
+        .unwrap();
+        let mut tp = Transcript::new(b"reveal-wrong");
+        let proofs =
+            ProofSystem::prove(&mut tp, std::slice::from_ref(&knowledge), &mut rng).unwrap();
+
+        // Verifier provides a different amount. The corresponding statement
+        // shifts `Ca - value'*Gg` and must fail verification.
+        let z_pub = (&z * &iparams.i).unwrap();
+        let bogus_statement =
+            show_credential_revealed_amount_statement(&presentation, &z_pub, value + 1, &iparams)
+                .unwrap();
+        let mut tv = Transcript::new(b"reveal-wrong");
+        let ok = ProofSystem::verify(&mut tv, std::slice::from_ref(&bogus_statement), &proofs)
+            .unwrap();
+        assert!(!ok);
     }
 
     #[test]

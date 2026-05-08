@@ -39,6 +39,7 @@ use crate::crypto::issuer_key::{CredentialIssuerParameters, CredentialIssuerSecr
 use crate::crypto::randomness::SecureRandom;
 use crate::wabisabi_client::WabiSabiClient as RsClient;
 use crate::zero_knowledge::Credential as RsCredential;
+use crate::zero_knowledge::RegistrationShow as RsRegistrationShow;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -157,6 +158,31 @@ impl PyIssuer {
         };
         Ok(PyBytes::new_bound(py, &encode(&response)?))
     }
+
+    /// Verify a JMP-0005 ZK-4 registration show.
+    ///
+    /// Returns the 33-byte compressed serial point on success;
+    /// raises `RuntimeError` if the show fails any of:
+    ///   * MAC binding (Z' != z_public),
+    ///   * Sigma proof under `transcript_label`,
+    ///   * revealed `amount` matching the rerandomized commitment.
+    ///
+    /// The caller is responsible for tracking serial uniqueness; this
+    /// method does not consult the issuer's seen-serial set.
+    fn verify_registration<'py>(
+        &self,
+        py: Python<'py>,
+        show_bytes: &[u8],
+        amount: i64,
+        transcript_label: &[u8],
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let show: RsRegistrationShow = decode(show_bytes)?;
+        let serial = self
+            .issuer()
+            .verify_registration_show(&show, amount, transcript_label)
+            .map_err(wabisabi_err)?;
+        Ok(PyBytes::new_bound(py, &serial))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +229,15 @@ impl PyCredential {
     /// The credential's plaintext value (sat, signed; <= max_amount).
     fn value(&self) -> i64 {
         self.inner.value()
+    }
+
+    /// 33-byte compressed serial point `S = r * Gs`.
+    ///
+    /// Deterministic in the credential's randomness; coordinators dedupe
+    /// shows on this byte-string.
+    fn serial<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let s = self.inner.serial().map_err(wabisabi_err)?;
+        Ok(PyBytes::new_bound(py, &s))
     }
 }
 
@@ -292,6 +327,28 @@ impl PyClient {
             .ok_or_else(|| PyRuntimeError::new_err("validation handle already consumed"))?;
         let credentials = self.inner.handle_response(&response, v).map_err(wabisabi_err)?;
         Ok(credentials.into_iter().map(|c| PyCredential { inner: c }).collect())
+    }
+
+    /// Build a JMP-0005 ZK-4 registration-show blob for `credential`.
+    ///
+    /// `transcript_label` should encode every output-bound field the
+    /// caller wants to make non-malleable (epoch id, address, amount,
+    /// output type). Returns bincode-encoded `RegistrationShow` bytes.
+    fn present_for_registration<'py>(
+        &self,
+        py: Python<'py>,
+        credential: PyCredential,
+        transcript_label: &[u8],
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let mut rng = SecureRandom::new();
+        let show = RsRegistrationShow::prove(
+            &credential.inner,
+            self.inner.coordinator_parameters(),
+            transcript_label,
+            &mut rng,
+        )
+        .map_err(wabisabi_err)?;
+        Ok(PyBytes::new_bound(py, &encode(&show)?))
     }
 }
 

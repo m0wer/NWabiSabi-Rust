@@ -48,6 +48,17 @@ impl Credential {
         &self.mac
     }
 
+    /// Compute the credential's serial point `S = r * Gs` and return it
+    /// in 33-byte compressed form.
+    ///
+    /// The serial is deterministic in the credential's randomness, so
+    /// repeated calls produce identical bytes. Coordinators dedupe on
+    /// this value to enforce single-use of each issued credential.
+    pub fn serial(&self) -> Result<[u8; 33]> {
+        let s = (&self.randomness * Generators::gs())?;
+        Ok(s.to_bytes())
+    }
+
     /// Randomize the credential for presentation to the coordinator
     ///
     /// This creates a CredentialPresentation that hides the link between

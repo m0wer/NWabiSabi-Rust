@@ -276,6 +276,21 @@ impl CredentialIssuer {
         let mut seen = self.serial_numbers.lock().unwrap();
         seen.clear();
     }
+
+    /// Verify a stand-alone [`RegistrationShow`] (JMP-0005 ZK-4) and
+    /// return the credential serial number on success.
+    ///
+    /// The issuer must keep its own seen-serial set (this method does
+    /// *not* dedupe) because registration shows are used outside the
+    /// transactional `handle_request` path.
+    pub fn verify_registration_show(
+        &self,
+        show: &crate::zero_knowledge::RegistrationShow,
+        amount: i64,
+        transcript_label: &[u8],
+    ) -> Result<[u8; 33]> {
+        show.verify(amount, &self.secret_key, &self.parameters, transcript_label)
+    }
 }
 
 #[cfg(test)]
